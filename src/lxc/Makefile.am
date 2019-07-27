@@ -45,7 +45,8 @@ noinst_HEADERS = api_extensions.h \
 		 ../tests/lxctest.h \
 		 tools/arguments.h \
 		 storage/storage_utils.h \
-		 utils.h
+		 utils.h \
+		 uuid.h
 
 if IS_BIONIC
 noinst_HEADERS += ../include/fexecve.h \
@@ -143,6 +144,7 @@ liblxc_la_SOURCES = af_unix.c af_unix.h \
 		    syscall_wrappers.h \
 		    terminal.c \
 		    utils.c utils.h \
+		    uuid.c uuid.h \
 		    version.h \
 		    $(LSM_SOURCES)
 
@@ -208,8 +210,8 @@ if ENABLE_APPARMOR
 AM_CFLAGS += -DHAVE_APPARMOR
 endif
 
-if ENABLE_GNUTLS
-AM_CFLAGS += -DHAVE_LIBGNUTLS
+if ENABLE_OPENSSL
+AM_CFLAGS += -DHAVE_OPENSSL
 endif
 
 if ENABLE_SECCOMP
@@ -246,7 +248,7 @@ liblxc_la_LDFLAGS = -pthread \
 		    -version-info @LXC_ABI_MAJOR@
 
 liblxc_la_LIBADD = $(CAP_LIBS) \
-		   $(GNUTLS_LIBS) \
+		   $(OPENSSL_LIBS) \
 		   $(SELINUX_LIBS) \
 		   $(SECCOMP_LIBS) \
 		   $(DLOG_LIBS)
@@ -305,7 +307,7 @@ endif
 
 LDADD = liblxc.la \
 	@CAP_LIBS@ \
-	@GNUTLS_LIBS@ \
+	@OPENSSL_LIBS@ \
 	@SECCOMP_LIBS@ \
 	@SELINUX_LIBS@ \
 	@DLOG_LIBS@

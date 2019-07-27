@@ -49,7 +49,24 @@
 #define MIPS_ARCH_N64 lxc_seccomp_arch_mips64
 #endif
 
+#ifndef SECCOMP_GET_NOTIF_SIZES
+#define SECCOMP_GET_NOTIF_SIZES 3
+#endif
+
 lxc_log_define(seccomp, lxc);
+
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+static inline int __seccomp(unsigned int operation, unsigned int flags,
+			  void *args)
+{
+#ifdef __NR_seccomp
+	return syscall(__NR_seccomp, operation, flags, args);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+#endif
 
 static int parse_config_v1(FILE *f, char *line, size_t *line_bufsz, struct lxc_conf *conf)
 {
@@ -92,8 +109,8 @@ static const char *get_action_name(uint32_t action)
 		return "trap";
 	case SCMP_ACT_ERRNO(0):
 		return "errno";
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
-	case SCMP_ACT_USER_NOTIF:
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	case SCMP_ACT_NOTIFY:
 		return "notify";
 #endif
 	}
@@ -125,9 +142,9 @@ static uint32_t get_v2_default_action(char *line)
 		ret_action = SCMP_ACT_ALLOW;
 	} else if (strncmp(line, "trap", 4) == 0) {
 		ret_action = SCMP_ACT_TRAP;
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	} else if (strncmp(line, "notify", 6) == 0) {
-		ret_action = SCMP_ACT_USER_NOTIF;
+		ret_action = SCMP_ACT_NOTIFY;
 #endif
 	} else if (line[0]) {
 		ERROR("Unrecognized seccomp action \"%s\"", line);
@@ -941,16 +958,11 @@ static int parse_config_v2(FILE *f, char *line, size_t *line_bufsz, struct lxc_c
 			goto bad_rule;
 		}
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
-		if ((rule.action == SCMP_ACT_USER_NOTIF) &&
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+		if ((rule.action == SCMP_ACT_NOTIFY) &&
 		    !conf->seccomp.notifier.wants_supervision) {
-			ret = seccomp_attr_set(conf->seccomp.seccomp_ctx,
-					       SCMP_FLTATR_NEW_LISTENER, 1);
-			if (ret)
-				goto bad_rule;
-
 			conf->seccomp.notifier.wants_supervision = true;
-			TRACE("Set SCMP_FLTATR_NEW_LISTENER attribute");
+			TRACE("Set SECCOMP_FILTER_FLAG_NEW_LISTENER attribute");
 		}
 #endif
 
@@ -1256,9 +1268,9 @@ int lxc_seccomp_load(struct lxc_conf *conf)
 	}
 #endif
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	if (conf->seccomp.notifier.wants_supervision) {
-		ret = seccomp_notif_get_fd(conf->seccomp.seccomp_ctx);
+		ret = seccomp_notify_fd(conf->seccomp.seccomp_ctx);
 		if (ret < 0) {
 			errno = -ret;
 			return -1;
@@ -1283,23 +1295,24 @@ void lxc_seccomp_free(struct lxc_seccomp *seccomp)
 	}
 #endif
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	close_prot_errno_disarm(seccomp->notifier.notify_fd);
 	close_prot_errno_disarm(seccomp->notifier.proxy_fd);
-	seccomp_notif_free(seccomp->notifier.req_buf, seccomp->notifier.rsp_buf);
+	seccomp_notify_free(seccomp->notifier.req_buf, seccomp->notifier.rsp_buf);
 	seccomp->notifier.req_buf = NULL;
 	seccomp->notifier.rsp_buf = NULL;
 #endif
 }
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 static int seccomp_notify_reconnect(struct lxc_handler *handler)
 {
 	__do_close_prot_errno int notify_fd = -EBADF;
 
 	close_prot_errno_disarm(handler->conf->seccomp.notifier.proxy_fd);
 
-	notify_fd = lxc_unix_connect(&handler->conf->seccomp.notifier.proxy_addr);
+	notify_fd = lxc_unix_connect_type(
+		&handler->conf->seccomp.notifier.proxy_addr, SOCK_SEQPACKET);
 	if (notify_fd < 0) {
 		SYSERROR("Failed to reconnect to seccomp proxy");
 		return -1;
@@ -1315,18 +1328,16 @@ static int seccomp_notify_reconnect(struct lxc_handler *handler)
 }
 #endif
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
-static int seccomp_notify_default_answer(int fd, struct seccomp_notif *req,
-					 struct seccomp_notif_resp *resp,
-					 struct lxc_handler *handler)
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+static void seccomp_notify_default_answer(int fd, struct seccomp_notif *req,
+					  struct seccomp_notif_resp *resp,
+					  struct lxc_handler *handler)
 {
 	resp->id = req->id;
 	resp->error = -ENOSYS;
 
-	if (seccomp_notif_send_resp(fd, resp))
+	if (seccomp_notify_respond(fd, resp))
 		SYSERROR("Failed to send default message to seccomp");
-
-	return seccomp_notify_reconnect(handler);
 }
 #endif
 
@@ -1334,36 +1345,64 @@ int seccomp_notify_handler(int fd, uint32_t events, void *data,
 			   struct lxc_epoll_descr *descr)
 {
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	__do_close_prot_errno int fd_pid = -EBADF;
 	__do_close_prot_errno int fd_mem = -EBADF;
-	int reconnect_count, ret;
+	int ret;
 	ssize_t bytes;
+	int send_fd_list[2];
+	struct iovec iov[4];
+	size_t iov_len, msg_base_size, msg_full_size;
 	char mem_path[6 /* /proc/ */
 		      + INTTYPE_TO_STRLEN(int64_t)
 		      + 3 /* mem */
 		      + 1 /* \0 */];
+	bool reconnected = false;
 	struct lxc_handler *hdlr = data;
 	struct lxc_conf *conf = hdlr->conf;
 	struct seccomp_notif *req = conf->seccomp.notifier.req_buf;
 	struct seccomp_notif_resp *resp = conf->seccomp.notifier.rsp_buf;
 	int listener_proxy_fd = conf->seccomp.notifier.proxy_fd;
 	struct seccomp_notify_proxy_msg msg = {0};
+	char *cookie = conf->seccomp.notifier.cookie;
+	uint64_t req_id;
 
-	if (listener_proxy_fd < 0) {
-		ERROR("No seccomp proxy registered");
-		return minus_one_set_errno(EINVAL);
-	}
-
-	ret = seccomp_notif_receive(fd, req);
+	ret = seccomp_notify_receive(fd, req);
 	if (ret) {
 		SYSERROR("Failed to read seccomp notification");
 		goto out;
 	}
 
+	if (listener_proxy_fd < 0) {
+		ret = -1;
+		/* Same condition as for the initial setup_proxy() */
+		if (conf->seccomp.notifier.wants_supervision &&
+		    conf->seccomp.notifier.proxy_addr.sun_path[1] != '\0') {
+			ret = seccomp_notify_reconnect(hdlr);
+		}
+		if (ret) {
+			ERROR("No seccomp proxy registered");
+			seccomp_notify_default_answer(fd, req, resp, hdlr);
+			goto out;
+		}
+		listener_proxy_fd = conf->seccomp.notifier.proxy_fd;
+	}
+
+	/* remember the ID in case we receive garbage from the proxy */
+	resp->id = req_id = req->id;
+
+	snprintf(mem_path, sizeof(mem_path), "/proc/%d", req->pid);
+	fd_pid = open(mem_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (fd_pid < 0) {
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		SYSERROR("Failed to open process pidfd for seccomp notify request");
+		goto out;
+	}
+
 	snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", req->pid);
-	fd_mem = open(mem_path, O_RDONLY | O_CLOEXEC);
+	fd_mem = open(mem_path, O_RDWR | O_CLOEXEC);
 	if (fd_mem < 0) {
-		(void)seccomp_notify_default_answer(fd, req, resp, hdlr);
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
 		SYSERROR("Failed to open process memory for seccomp notify request");
 		goto out;
 	}
@@ -1372,42 +1411,82 @@ int seccomp_notify_handler(int fd, uint32_t events, void *data,
 	 * Make sure that the fd for /proc/<pid>/mem we just opened still
 	 * refers to the correct process's memory.
 	 */
-	ret = seccomp_notif_id_valid(fd, req->id);
+	ret = seccomp_notify_id_valid(fd, req->id);
 	if (ret < 0) {
-		(void)seccomp_notify_default_answer(fd, req, resp, hdlr);
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
 		SYSERROR("Invalid seccomp notify request id");
 		goto out;
 	}
 
-	memcpy(&msg.req, req, sizeof(msg.req));
 	msg.monitor_pid = hdlr->monitor_pid;
 	msg.init_pid = hdlr->pid;
+	memcpy(&msg.sizes, &conf->seccomp.notifier.sizes, sizeof(msg.sizes));
 
-	reconnect_count = 0;
-	do {
-		bytes = lxc_unix_send_fds(listener_proxy_fd, &fd_mem, 1, &msg,
-					  sizeof(msg));
-		if (bytes != (ssize_t)sizeof(msg)) {
-			SYSERROR("Failed to forward message to seccomp proxy");
-			if (seccomp_notify_default_answer(fd, req, resp, hdlr))
-				goto out;
+	msg_base_size = 0;
+	iov[0].iov_base = &msg;
+	msg_base_size += (iov[0].iov_len = sizeof(msg));
+	iov[1].iov_base = req;
+	msg_base_size += (iov[1].iov_len = msg.sizes.seccomp_notif);
+	iov[2].iov_base = resp;
+	msg_base_size += (iov[2].iov_len = msg.sizes.seccomp_notif_resp);
+	msg_full_size = msg_base_size;
+
+	if (cookie) {
+		size_t len = strlen(cookie);
+
+		msg.cookie_len = (uint64_t)len;
+
+		iov[3].iov_base = cookie;
+		msg_full_size += (iov[3].iov_len = len);
+
+		iov_len = 4;
+	} else {
+		iov_len = 3;
+	}
+
+	send_fd_list[0] = fd_pid;
+	send_fd_list[1] = fd_mem;
+
+retry:
+	bytes = lxc_abstract_unix_send_fds_iov(listener_proxy_fd, send_fd_list,
+					       2, iov, iov_len);
+	if (bytes != (ssize_t)msg_full_size) {
+		SYSERROR("Failed to forward message to seccomp proxy");
+		if (!reconnected) {
+			ret = seccomp_notify_reconnect(hdlr);
+			if (ret == 0) {
+				reconnected = true;
+				goto retry;
+			}
 		}
-	} while (reconnect_count++);
+
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		goto out;
+	}
 
 	close_prot_errno_disarm(fd_mem);
 
-	reconnect_count = 0;
-	do {
-		bytes = lxc_recv_nointr(listener_proxy_fd, &msg, sizeof(msg), 0);
-		if (bytes != (ssize_t)sizeof(msg)) {
-			SYSERROR("Failed to receive message from seccomp proxy");
-			if (seccomp_notify_default_answer(fd, req, resp, hdlr))
-				goto out;
-		}
-	} while (reconnect_count++);
+	if (msg.__reserved != 0) {
+		ERROR("Proxy filled reserved data in response");
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		goto out;
+	}
 
-	memcpy(resp, &msg.resp, sizeof(*resp));
-	ret = seccomp_notif_send_resp(fd, resp);
+	if (resp->id != req_id) {
+		resp->id = req_id;
+		ERROR("Proxy returned response with illegal id");
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		goto out;
+	}
+
+	bytes = lxc_recvmsg_nointr_iov(listener_proxy_fd, iov, iov_len, MSG_TRUNC);
+	if (bytes != (ssize_t)msg_base_size) {
+		SYSERROR("Failed to receive message from seccomp proxy");
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		goto out;
+	}
+
+	ret = seccomp_notify_respond(fd, resp);
 	if (ret)
 		SYSERROR("Failed to send seccomp notification");
 
@@ -1425,7 +1504,7 @@ void seccomp_conf_init(struct lxc_conf *conf)
 	conf->seccomp.allow_nesting = 0;
 	memset(&conf->seccomp.seccomp_ctx, 0, sizeof(conf->seccomp.seccomp_ctx));
 #endif /* HAVE_SCMP_FILTER_CTX */
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	conf->seccomp.notifier.wants_supervision = false;
 	conf->seccomp.notifier.notify_fd = -EBADF;
 	conf->seccomp.notifier.proxy_fd = -EBADF;
@@ -1440,13 +1519,14 @@ int lxc_seccomp_setup_proxy(struct lxc_seccomp *seccomp,
 			    struct lxc_epoll_descr *descr,
 			    struct lxc_handler *handler)
 {
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	if (seccomp->notifier.wants_supervision &&
 	    seccomp->notifier.proxy_addr.sun_path[1] != '\0') {
 		__do_close_prot_errno int notify_fd = -EBADF;
 		int ret;
 
-		notify_fd = lxc_unix_connect(&seccomp->notifier.proxy_addr);
+		notify_fd = lxc_unix_connect_type(&seccomp->notifier.proxy_addr,
+					     SOCK_SEQPACKET);
 		if (notify_fd < 0) {
 			SYSERROR("Failed to connect to seccomp proxy");
 			return -1;
@@ -1459,7 +1539,14 @@ int lxc_seccomp_setup_proxy(struct lxc_seccomp *seccomp,
 			return -1;
 		}
 
-		ret = seccomp_notif_alloc(&seccomp->notifier.req_buf,
+		ret = __seccomp(SECCOMP_GET_NOTIF_SIZES, 0,
+				&seccomp->notifier.sizes);
+		if (ret) {
+			SYSERROR("Failed to query seccomp notify struct sizes");
+			return -1;
+		}
+
+		ret = seccomp_notify_alloc(&seccomp->notifier.req_buf,
 					  &seccomp->notifier.rsp_buf);
 		if (ret) {
 			ERROR("Failed to allocate seccomp notify request and response buffers");
@@ -1484,7 +1571,7 @@ int lxc_seccomp_setup_proxy(struct lxc_seccomp *seccomp,
 
 int lxc_seccomp_send_notifier_fd(struct lxc_seccomp *seccomp, int socket_fd)
 {
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	if (seccomp->notifier.wants_supervision) {
 		if (lxc_abstract_unix_send_fds(socket_fd,
 					       &seccomp->notifier.notify_fd, 1,
@@ -1498,7 +1585,7 @@ int lxc_seccomp_send_notifier_fd(struct lxc_seccomp *seccomp, int socket_fd)
 
 int lxc_seccomp_recv_notifier_fd(struct lxc_seccomp *seccomp, int socket_fd)
 {
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	if (seccomp->notifier.wants_supervision) {
 		int ret;
 
@@ -1516,7 +1603,7 @@ int lxc_seccomp_add_notifier(const char *name, const char *lxcpath,
 			     struct lxc_seccomp *seccomp)
 {
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	if (seccomp->notifier.wants_supervision) {
 		int ret;
 

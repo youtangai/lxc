@@ -139,6 +139,7 @@ lxc_config_define(net_nic);
 lxc_config_define(net_script_down);
 lxc_config_define(net_script_up);
 lxc_config_define(net_type);
+lxc_config_define(net_veth_mode);
 lxc_config_define(net_veth_pair);
 lxc_config_define(net_veth_ipv4_route);
 lxc_config_define(net_veth_ipv6_route);
@@ -153,6 +154,7 @@ lxc_config_define(rootfs_options);
 lxc_config_define(rootfs_path);
 lxc_config_define(seccomp_profile);
 lxc_config_define(seccomp_allow_nesting);
+lxc_config_define(seccomp_notify_cookie);
 lxc_config_define(seccomp_notify_proxy);
 lxc_config_define(selinux_context);
 lxc_config_define(signal_halt);
@@ -233,6 +235,7 @@ static struct lxc_config_t config_jump_table[] = {
 	{ "lxc.net.script.up",             set_config_net_script_up,               get_config_net_script_up,               clr_config_net_script_up,             },
 	{ "lxc.net.type",                  set_config_net_type,                    get_config_net_type,                    clr_config_net_type,                  },
 	{ "lxc.net.vlan.id",               set_config_net_vlan_id,                 get_config_net_vlan_id,                 clr_config_net_vlan_id,               },
+	{ "lxc.net.veth.mode",             set_config_net_veth_mode,               get_config_net_veth_mode,               clr_config_net_veth_mode,             },
 	{ "lxc.net.veth.pair",             set_config_net_veth_pair,               get_config_net_veth_pair,               clr_config_net_veth_pair,             },
 	{ "lxc.net.veth.ipv4.route",       set_config_net_veth_ipv4_route,         get_config_net_veth_ipv4_route,         clr_config_net_veth_ipv4_route,       },
 	{ "lxc.net.veth.ipv6.route",       set_config_net_veth_ipv6_route,         get_config_net_veth_ipv6_route,         clr_config_net_veth_ipv6_route,       },
@@ -246,6 +249,7 @@ static struct lxc_config_t config_jump_table[] = {
 	{ "lxc.rootfs.options",            set_config_rootfs_options,              get_config_rootfs_options,              clr_config_rootfs_options,            },
 	{ "lxc.rootfs.path",               set_config_rootfs_path,                 get_config_rootfs_path,                 clr_config_rootfs_path,               },
 	{ "lxc.seccomp.allow_nesting",     set_config_seccomp_allow_nesting,       get_config_seccomp_allow_nesting,       clr_config_seccomp_allow_nesting,     },
+	{ "lxc.seccomp.notify.cookie",     set_config_seccomp_notify_cookie,       get_config_seccomp_notify_cookie,       clr_config_seccomp_notify_cookie,     },
 	{ "lxc.seccomp.notify.proxy",      set_config_seccomp_notify_proxy,        get_config_seccomp_notify_proxy,        clr_config_seccomp_notify_proxy,      },
 	{ "lxc.seccomp.profile",           set_config_seccomp_profile,             get_config_seccomp_profile,             clr_config_seccomp_profile,           },
 	{ "lxc.selinux.context",           set_config_selinux_context,             get_config_selinux_context,             clr_config_selinux_context,           },
@@ -301,6 +305,7 @@ static int set_config_net_type(const char *key, const char *value,
 		netdev->type = LXC_NET_VETH;
 		lxc_list_init(&netdev->priv.veth_attr.ipv4_routes);
 		lxc_list_init(&netdev->priv.veth_attr.ipv6_routes);
+		lxc_veth_mode_to_flag(&netdev->priv.veth_attr.mode, "bridge");
 	} else if (strcmp(value, "macvlan") == 0) {
 		netdev->type = LXC_NET_MACVLAN;
 		lxc_macvlan_mode_to_flag(&netdev->priv.macvlan_attr.mode, "private");
@@ -446,6 +451,21 @@ static int set_config_net_name(const char *key, const char *value,
 		return -1;
 
 	return network_ifname(netdev->name, value, sizeof(netdev->name));
+}
+
+
+static int set_config_net_veth_mode(const char *key, const char *value,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_net_veth_mode(key, lxc_conf, data);
+
+	if (!netdev)
+		return -1;
+
+	return lxc_veth_mode_to_flag(&netdev->priv.veth_attr.mode, value);
 }
 
 static int set_config_net_veth_pair(const char *key, const char *value,
@@ -1010,6 +1030,16 @@ static int set_config_seccomp_allow_nesting(const char *key, const char *value,
 #else
 	errno = ENOSYS;
 	return -1;
+#endif
+}
+
+static int set_config_seccomp_notify_cookie(const char *key, const char *value,
+					    struct lxc_conf *lxc_conf, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	return set_config_string_item(&lxc_conf->seccomp.notifier.cookie, value);
+#else
+	return minus_one_set_errno(ENOSYS);
 #endif
 }
 
@@ -3955,6 +3985,16 @@ static int get_config_seccomp_allow_nesting(const char *key, char *retv,
 #endif
 }
 
+static int get_config_seccomp_notify_cookie(const char *key, char *retv, int inlen,
+					    struct lxc_conf *c, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	return lxc_get_conf_str(retv, inlen, c->seccomp.notifier.cookie);
+#else
+	return minus_one_set_errno(ENOSYS);
+#endif
+}
+
 static int get_config_seccomp_notify_proxy(const char *key, char *retv, int inlen,
 					   struct lxc_conf *c, void *data)
 {
@@ -4563,6 +4603,18 @@ static inline int clr_config_seccomp_allow_nesting(const char *key,
 #endif
 }
 
+static inline int clr_config_seccomp_notify_cookie(const char *key,
+						   struct lxc_conf *c, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	free(c->seccomp.notifier.cookie);
+	c->seccomp.notifier.cookie = NULL;
+	return 0;
+#else
+	return minus_one_set_errno(ENOSYS);
+#endif
+}
+
 static inline int clr_config_seccomp_notify_proxy(const char *key,
 						   struct lxc_conf *c, void *data)
 {
@@ -5060,6 +5112,22 @@ static int clr_config_net_ipvlan_isolation(const char *key,
 	return 0;
 }
 
+static int clr_config_net_veth_mode(const char *key,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_VETH)
+		return 0;
+
+	netdev->priv.veth_attr.mode = -1;
+
+	return 0;
+}
+
 static int clr_config_net_veth_pair(const char *key, struct lxc_conf *lxc_conf,
 				    void *data)
 {
@@ -5471,6 +5539,42 @@ static int get_config_net_ipvlan_isolation(const char *key, char *retv, int inle
 		break;
 	case IPVLAN_ISOLATION_VEPA:
 		mode = "vepa";
+		break;
+	default:
+		mode = "(invalid)";
+		break;
+	}
+
+	strprint(retv, inlen, "%s", mode);
+
+	return fulllen;
+}
+
+static int get_config_net_veth_mode(const char *key, char *retv, int inlen,
+				       struct lxc_conf *c, void *data)
+{
+	int len;
+	int fulllen = 0;
+	const char *mode;
+	struct lxc_netdev *netdev = data;
+
+	if (!retv)
+		inlen = 0;
+	else
+		memset(retv, 0, inlen);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_VETH)
+		return 0;
+
+	switch (netdev->priv.veth_attr.mode) {
+	case VETH_MODE_BRIDGE:
+		mode = "bridge";
+		break;
+	case VETH_MODE_ROUTER:
+		mode = "router";
 		break;
 	default:
 		mode = "(invalid)";

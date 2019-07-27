@@ -32,7 +32,7 @@
 #include <linux/seccomp.h>
 #include <seccomp.h>
 #endif
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 #include <sys/socket.h>
 #include <sys/un.h>
 #endif
@@ -45,17 +45,30 @@ struct lxc_conf;
 struct lxc_epoll_descr;
 struct lxc_handler;
 
+#ifndef SECCOMP_FILTER_FLAG_NEW_LISTENER
+#define SECCOMP_FILTER_FLAG_NEW_LISTENER (1UL << 3)
+#endif
+
 #ifdef HAVE_SECCOMP
 
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+
+#if !HAVE_STRUCT_SECCOMP_NOTIF_SIZES
+struct seccomp_notif_sizes {
+	__u16 seccomp_notif;
+	__u16 seccomp_notif_resp;
+	__u16 seccomp_data;
+};
+#endif
 
 struct seccomp_notify_proxy_msg {
-	uint32_t version;
-	struct seccomp_notif req;
-	struct seccomp_notif_resp resp;
+	uint64_t __reserved;
 	pid_t monitor_pid;
 	pid_t init_pid;
+	struct seccomp_notif_sizes sizes;
+	uint64_t cookie_len;
+	/* followed by: seccomp_notif, seccomp_notif_resp, cookie */
 };
 
 struct seccomp_notify {
@@ -63,13 +76,15 @@ struct seccomp_notify {
 	int notify_fd;
 	int proxy_fd;
 	struct sockaddr_un proxy_addr;
+	struct seccomp_notif_sizes sizes;
 	struct seccomp_notif *req_buf;
 	struct seccomp_notif_resp *rsp_buf;
+	char *cookie;
 };
 
 #define HAVE_SECCOMP_NOTIFY 1
 
-#endif /* HAVE_DECL_SECCOMP_NOTIF_GET_FD */
+#endif /* HAVE_DECL_SECCOMP_NOTIFY_FD */
 
 struct lxc_seccomp {
 	char *seccomp;
@@ -78,9 +93,9 @@ struct lxc_seccomp {
 	scmp_filter_ctx seccomp_ctx;
 #endif /* HAVE_SCMP_FILTER_CTX */
 
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	struct seccomp_notify notifier;
-#endif /* HAVE_DECL_SECCOMP_NOTIF_GET_FD */
+#endif /* HAVE_DECL_SECCOMP_NOTIFY_FD */
 };
 
 extern int lxc_seccomp_load(struct lxc_conf *conf);
@@ -100,7 +115,7 @@ extern int lxc_seccomp_add_notifier(const char *name, const char *lxcpath,
 				    struct lxc_seccomp *seccomp);
 static inline int lxc_seccomp_get_notify_fd(struct lxc_seccomp *seccomp)
 {
-#if HAVE_DECL_SECCOMP_NOTIF_GET_FD
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
 	return seccomp->notifier.notify_fd;
 #else
 	errno = ENOSYS;

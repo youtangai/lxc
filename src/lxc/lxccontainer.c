@@ -79,6 +79,10 @@
 #include "utils.h"
 #include "version.h"
 
+#if HAVE_OPENSSL
+#include <openssl/evp.h>
+#endif
+
 /* major()/minor() */
 #ifdef MAJOR_IN_MKDEV
 #include <sys/mkdev.h>
@@ -1300,6 +1304,7 @@ static struct lxc_storage *do_storage_create(struct lxc_container *c,
 
 	if (!c->set_config_item(c, "lxc.rootfs.path", bdev->src)) {
 		ERROR("Failed to set \"lxc.rootfs.path = %s\"", bdev->src);
+		storage_put(bdev);
 		return NULL;
 	}
 
@@ -1320,12 +1325,13 @@ static struct lxc_storage *do_storage_create(struct lxc_container *c,
 	return bdev;
 }
 
-static char *lxcbasename(char *path)
+/* Strip path and return name of file for argv[0] passed to execvp */
+static char *lxctemplatefilename(char *tpath)
 {
 	char *p;
 
-	p = path + strlen(path) - 1;
-	while (*p != '/' && p > path)
+	p = tpath + strlen(tpath) - 1;
+	while ( (p-1) >= tpath && *(p-1) != '/')
 		p--;
 
 	return p;
@@ -1451,7 +1457,7 @@ static bool create_run_template(struct lxc_container *c, char *tpath,
 		newargv = malloc(nargs * sizeof(*newargv));
 		if (!newargv)
 			_exit(EXIT_FAILURE);
-		newargv[0] = lxcbasename(tpath);
+		newargv[0] = lxctemplatefilename(tpath);
 
 		/* --path */
 		len = strlen(c->config_path) + strlen(c->name) + strlen("--path=") + 2;
@@ -1653,9 +1659,9 @@ static bool prepend_lxc_header(char *path, const char *t, char *const argv[])
 	char *contents;
 	FILE *f;
 	int ret = -1;
-#if HAVE_LIBGNUTLS
-	int i;
-	unsigned char md_value[SHA_DIGEST_LENGTH];
+#if HAVE_OPENSSL
+	int i, md_len = 0;
+	unsigned char md_value[EVP_MAX_MD_SIZE];
 	char *tpath;
 #endif
 
@@ -1696,14 +1702,14 @@ static bool prepend_lxc_header(char *path, const char *t, char *const argv[])
 	if (ret < 0)
 		goto out_free_contents;
 
-#if HAVE_LIBGNUTLS
+#if HAVE_OPENSSL
 	tpath = get_template_path(t);
 	if (!tpath) {
 		ERROR("Invalid template \"%s\" specified", t);
 		goto out_free_contents;
 	}
 
-	ret = sha1sum_file(tpath, md_value);
+	ret = sha1sum_file(tpath, md_value, &md_len);
 	if (ret < 0) {
 		ERROR("Failed to get sha1sum of %s", tpath);
 		free(tpath);
@@ -1729,9 +1735,9 @@ static bool prepend_lxc_header(char *path, const char *t, char *const argv[])
 		fprintf(f, "\n");
 	}
 
-#if HAVE_LIBGNUTLS
+#if HAVE_OPENSSL
 	fprintf(f, "# Template script checksum (SHA-1): ");
-	for (i=0; i<SHA_DIGEST_LENGTH; i++)
+	for (i=0; i<md_len; i++)
 		fprintf(f, "%02x", md_value[i]);
 	fprintf(f, "\n");
 #endif
@@ -5111,33 +5117,37 @@ static int do_lxcapi_mount(struct lxc_container *c, const char *source,
 
 		suff = strrchr(template, '/');
 		if (!suff)
-			_exit(EXIT_FAILURE);
+			goto cleanup_target_in_child;
 
 		ret = snprintf(path, sizeof(path), "%s%s", c->lxc_conf->shmount.path_cont, suff);
 		if (ret < 0 || (size_t)ret >= sizeof(path)) {
 			SYSERROR("Error writing container mountpoint name");
-			_exit(EXIT_FAILURE);
+			goto cleanup_target_in_child;
 		}
 
 		ret = mount(path, target, NULL, MS_MOVE | MS_REC, NULL);
 		if (ret < 0) {
 			SYSERROR("Failed to move the mount from \"%s\" to \"%s\"", path, target);
-			_exit(EXIT_FAILURE);
+			goto cleanup_target_in_child;
 		}
 		TRACE("Moved mount from \"%s\" to \"%s\"", path, target);
 
 		_exit(EXIT_SUCCESS);
+
+	cleanup_target_in_child:
+		(void)remove(target);
+		_exit(EXIT_FAILURE);
 	}
 
 	ret = wait_for_pid(pid);
-	if (ret < 0) {
-		SYSERROR("Wait for the child with pid %ld failed", (long) pid);
-		goto out;
-	}
+	if (ret < 0)
+		SYSERROR("Wait for the child with pid %ld failed", (long)pid);
+	else
+		ret = 0;
 
-	ret = 0;
+	if (umount2(template, MNT_DETACH))
+		SYSWARN("Failed to remove temporary mount \"%s\"", template);
 
-	(void)umount2(template, MNT_DETACH);
 	if (is_dir)
 		(void)rmdir(template);
 	else
@@ -5242,23 +5252,15 @@ out:
 	return ret;
 }
 
-static int do_lxcapi_seccomp_notify(struct lxc_container *c, unsigned int cmd, int fd)
+static int do_lxcapi_seccomp_notify_fd(struct lxc_container *c)
 {
 	if (!c || !c->lxc_conf)
 		return minus_one_set_errno(-EINVAL);
 
-	switch (cmd) {
-	case LXC_SECCOMP_NOTIFY_GET_FD:
-		if (fd)
-			return minus_one_set_errno(EINVAL);
-
-		return lxc_seccomp_get_notify_fd(&c->lxc_conf->seccomp);
-	}
-
-	return minus_one_set_errno(EINVAL);
+	return lxc_seccomp_get_notify_fd(&c->lxc_conf->seccomp);
 }
 
-WRAP_API_2(int, lxcapi_seccomp_notify, unsigned int, int)
+WRAP_API(int, lxcapi_seccomp_notify_fd)
 
 struct lxc_container *lxc_container_new(const char *name, const char *configpath)
 {
@@ -5399,7 +5401,7 @@ struct lxc_container *lxc_container_new(const char *name, const char *configpath
 	c->console_log = lxcapi_console_log;
 	c->mount = lxcapi_mount;
 	c->umount = lxcapi_umount;
-	c->seccomp_notify = lxcapi_seccomp_notify;
+	c->seccomp_notify_fd = lxcapi_seccomp_notify_fd;
 
 	return c;
 

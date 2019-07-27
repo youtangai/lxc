@@ -1132,7 +1132,6 @@ static int do_start(void *data)
 	ATTR_UNUSED __do_close_prot_errno int data_sock0 = handler->data_sock[0],
 					      data_sock1 = handler->data_sock[1];
 	int ret;
-	char path[PATH_MAX];
 	uid_t new_uid;
 	gid_t new_gid;
 	struct lxc_list *iterator;
@@ -1194,10 +1193,12 @@ static int do_start(void *data)
 	if (ret < 0)
 		goto out_error;
 
-	ret = lxc_network_recv_veth_names_from_parent(handler);
-	if (ret < 0) {
-		ERROR("Failed to receive veth names from parent");
-		goto out_warn_father;
+	if (handler->ns_clone_flags & CLONE_NEWNET) {
+		ret = lxc_network_recv_from_parent(handler);
+		if (ret < 0) {
+			ERROR("Failed to receive veth names from parent");
+			goto out_warn_father;
+		}
 	}
 
 	/* If we are in a new user namespace, become root there to have
@@ -1239,11 +1240,6 @@ static int do_start(void *data)
 		goto out_warn_father;
 	}
 
-	ret = snprintf(path, sizeof(path), "%s/dev/null",
-		       handler->conf->rootfs.mount);
-	if (ret < 0 || ret >= sizeof(path))
-		goto out_warn_father;
-
 	/* In order to checkpoint restore, we need to have everything in the
 	 * same mount namespace. However, some containers may not have a
 	 * reasonable /dev (in particular, they may not have /dev/null), so we
@@ -1255,6 +1251,13 @@ static int do_start(void *data)
 	 * where it isn't wanted.
 	 */
 	if (handler->daemonize && !handler->conf->autodev) {
+		char path[PATH_MAX];
+
+		ret = snprintf(path, sizeof(path), "%s/dev/null",
+			       handler->conf->rootfs.mount);
+		if (ret < 0 || ret >= sizeof(path))
+			goto out_warn_father;
+
 		ret = access(path, F_OK);
 		if (ret != 0) {
 			devnull_fd = open_devnull();
@@ -1638,7 +1641,10 @@ static int proc_pidfd_open(pid_t pid)
 
 	/* Test whether we can send signals. */
 	if (lxc_raw_pidfd_send_signal(proc_pidfd, 0, NULL, 0)) {
-		SYSERROR("Failed to send signal through pidfd");
+		if (errno != ENOSYS)
+			SYSERROR("Failed to send signal through pidfd");
+		else
+			INFO("Sending signals through pidfds not supported on this kernel");
 		return -1;
 	}
 
@@ -1695,27 +1701,10 @@ static int lxc_spawn(struct lxc_handler *handler)
 		goto out_sync_fini;
 
 	if (handler->ns_clone_flags & CLONE_NEWNET) {
-		if (!lxc_list_empty(&conf->network)) {
-
-			/* Find gateway addresses from the link device, which is
-			 * no longer accessible inside the container. Do this
-			 * before creating network interfaces, since goto
-			 * out_delete_net does not work before lxc_clone.
-			 */
-			ret = lxc_find_gateway_addresses(handler);
-			if (ret < 0) {
-				ERROR("Failed to find gateway addresses");
-				goto out_sync_fini;
-			}
-
-			/* That should be done before the clone because we will
-			 * fill the netdev index and use them in the child.
-			 */
-			ret = lxc_create_network_priv(handler);
-			if (ret < 0) {
-				ERROR("Failed to create the network");
-				goto out_delete_net;
-			}
+		ret = lxc_find_gateway_addresses(handler);
+		if (ret) {
+			ERROR("Failed to find gateway addresses");
+			goto out_sync_fini;
 		}
 	}
 
@@ -1779,6 +1768,14 @@ static int lxc_spawn(struct lxc_handler *handler)
 			goto out_delete_net;
 	}
 
+	ret = snprintf(pidstr, 20, "%d", handler->pid);
+	if (ret < 0 || ret >= 20)
+		goto out_delete_net;
+
+	ret = setenv("LXC_PID", pidstr, 1);
+	if (ret < 0)
+		SYSERROR("Failed to set environment variable: LXC_PID=%s", pidstr);
+
 	for (i = 0; i < LXC_NS_MAX; i++)
 		if (handler->ns_on_clone_flags & ns_info[i].clone_flag)
 			INFO("Cloned %s", ns_info[i].flag_name);
@@ -1826,47 +1823,38 @@ static int lxc_spawn(struct lxc_handler *handler)
 	if (!cgroup_ops->chown(cgroup_ops, handler->conf))
 		goto out_delete_net;
 
-	/* Now we're ready to preserve the network namespace */
-	ret = lxc_try_preserve_ns(handler->pid, "net");
-	if (ret < 0) {
-		if (ret != -EOPNOTSUPP) {
-			SYSERROR("Failed to preserve net namespace");
-			goto out_delete_net;
+	/* If not done yet, we're now ready to preserve the network namespace */
+	if (handler->nsfd[LXC_NS_NET] < 0) {
+		ret = lxc_try_preserve_ns(handler->pid, "net");
+		if (ret < 0) {
+			if (ret != -EOPNOTSUPP) {
+				SYSERROR("Failed to preserve net namespace");
+				goto out_delete_net;
+			}
+		} else {
+			handler->nsfd[LXC_NS_NET] = ret;
+			DEBUG("Preserved net namespace via fd %d", ret);
 		}
-	} else {
-		handler->nsfd[LXC_NS_NET] = ret;
-		DEBUG("Preserved net namespace via fd %d", ret);
-
-		ret = lxc_netns_set_nsid(handler->nsfd[LXC_NS_NET]);
-		if (ret < 0)
-			SYSWARN("Failed to allocate new network namespace id");
-		else
-			TRACE("Allocated new network namespace id");
 	}
+	ret = lxc_netns_set_nsid(handler->nsfd[LXC_NS_NET]);
+	if (ret < 0)
+		SYSWARN("Failed to allocate new network namespace id");
+	else
+		TRACE("Allocated new network namespace id");
 
 	/* Create the network configuration. */
 	if (handler->ns_clone_flags & CLONE_NEWNET) {
-		ret = lxc_network_move_created_netdev_priv(handler->lxcpath,
-							   handler->name,
-							   &conf->network,
-							   handler->pid);
+		ret = lxc_create_network(handler);
 		if (ret < 0) {
-			ERROR("Failed to create the configured network");
+			ERROR("Failed to create the network");
 			goto out_delete_net;
 		}
 
-		ret = lxc_create_network_unpriv(handler->lxcpath, handler->name,
-						&conf->network, handler->pid, conf->hooks_version);
+		ret = lxc_network_send_to_child(handler);
 		if (ret < 0) {
-			ERROR("Failed to create the configured network");
+			ERROR("Failed to send veth names to child");
 			goto out_delete_net;
 		}
-	}
-
-	ret = lxc_network_send_veth_names_to_child(handler);
-	if (ret < 0) {
-		ERROR("Failed to send veth names to child");
-		goto out_delete_net;
 	}
 
 	if (!lxc_list_empty(&conf->procs)) {
@@ -1914,14 +1902,6 @@ static int lxc_spawn(struct lxc_handler *handler)
 		}
 	}
 
-	ret = snprintf(pidstr, 20, "%d", handler->pid);
-	if (ret < 0 || ret >= 20)
-		goto out_delete_net;
-
-	ret = setenv("LXC_PID", pidstr, 1);
-	if (ret < 0)
-		SYSERROR("Failed to set environment variable: LXC_PID=%s", pidstr);
-
 	/* Run any host-side start hooks */
 	ret = run_lxc_hooks(name, "start-host", conf, NULL);
 	if (ret < 0) {
@@ -1939,11 +1919,12 @@ static int lxc_spawn(struct lxc_handler *handler)
 	if (ret < 0)
 		goto out_delete_net;
 
-	ret = lxc_network_recv_name_and_ifindex_from_child(handler);
-	if (ret < 0) {
-		ERROR("Failed to receive names and ifindices for network "
-		      "devices from child");
-		goto out_delete_net;
+	if (handler->ns_clone_flags & CLONE_NEWNET) {
+		ret = lxc_network_recv_name_and_ifindex_from_child(handler);
+		if (ret < 0) {
+			ERROR("Failed to receive names and ifindices for network devices from child");
+			goto out_delete_net;
+		}
 	}
 
 	/* Now all networks are created, network devices are moved into place,
