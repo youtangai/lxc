@@ -234,6 +234,10 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		/* --ghost-limit 1024 */
 		if (opts->user->ghost_limit)
 			static_args += 2;
+
+		if (opts->user->is_zanshin)
+		    static_args +=1;
+
 	} else if (strcmp(opts->action, "restore") == 0) {
 		/* --root $(lxc_mount_point) --restore-detached
 		 * --restore-sibling
@@ -468,6 +472,9 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 			DECLARE_ARG(opts->user->predump_dir);
 			DECLARE_ARG("--track-mem");
 		}
+
+		if (opts->user->is_zanshin)
+		    DECLARE_ARG("--track-mem");
 
 		if (opts->user->pageserver_address && opts->user->pageserver_port) {
 			DECLARE_ARG("--page-server");
