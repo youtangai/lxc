@@ -663,6 +663,8 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 	close(opts->pipefd);
 
 #undef DECLARE_ARG
+	for (i = 0; argv[i]; i++)
+	    INFO("youtangai: %s", argv[i]);
 	execv(argv[0], argv);
 err:
 	for (i = 0; argv[i]; i++)
