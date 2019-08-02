@@ -241,6 +241,10 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		 */
 		static_args += 6;
 
+		if (opts->user->is_zanshin) {
+		    static_args += 1;
+		}
+
 		ttys[0] = 0;
 		if (load_tty_major_minor(opts->user->directory, ttys, sizeof(ttys)))
 			return;
@@ -501,6 +505,10 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		DECLARE_ARG(opts->c->lxc_conf->rootfs.mount);
 		DECLARE_ARG("--restore-detached");
 		DECLARE_ARG("--restore-sibling");
+
+		if (opts->user->is_zanshin) {
+		    DECLARE_ARG("--track-mem");
+		}
 
 		if (ttys[0]) {
 			if (opts->console_fd < 0) {

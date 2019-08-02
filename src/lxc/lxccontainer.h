@@ -966,6 +966,12 @@ struct migrate_opts {
 	 * in which the desired feature checks can be encoded.
 	 */
 	uint64_t features_to_check;
+
+    /*
+     * added by youtangai
+     * field for zanshin
+     */
+    bool is_zanshin;
 };
 
 struct lxc_console_log {
