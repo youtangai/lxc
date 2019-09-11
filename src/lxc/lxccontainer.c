@@ -4821,6 +4821,7 @@ WRAP_API_2(bool, lxcapi_detach_interface, const char *, const char *)
 static int do_lxcapi_migrate(struct lxc_container *c, unsigned int cmd,
 			     struct migrate_opts *opts, unsigned int size)
 {
+    DEBUG("youtangai: hello world from lxc migrate");
 	int ret = -1;
 	struct migrate_opts *valid_opts = opts;
 	uint64_t features_to_check = 0;
