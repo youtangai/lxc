@@ -31,9 +31,14 @@
 #include <sys/mount.h>
 #include <sys/utsname.h>
 
+#include "af_unix.h"
+#include "commands.h"
 #include "config.h"
 #include "log.h"
+#include "lxccontainer.h"
 #include "lxcseccomp.h"
+#include "mainloop.h"
+#include "memory_utils.h"
 #include "utils.h"
 
 #ifdef __MIPSEL__
@@ -44,7 +49,24 @@
 #define MIPS_ARCH_N64 lxc_seccomp_arch_mips64
 #endif
 
+#ifndef SECCOMP_GET_NOTIF_SIZES
+#define SECCOMP_GET_NOTIF_SIZES 3
+#endif
+
 lxc_log_define(seccomp, lxc);
+
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+static inline int __seccomp(unsigned int operation, unsigned int flags,
+			  void *args)
+{
+#ifdef __NR_seccomp
+	return syscall(__NR_seccomp, operation, flags, args);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+#endif
 
 static int parse_config_v1(FILE *f, char *line, size_t *line_bufsz, struct lxc_conf *conf)
 {
@@ -60,7 +82,7 @@ static int parse_config_v1(FILE *f, char *line, size_t *line_bufsz, struct lxc_c
 		}
 
 #if HAVE_SCMP_FILTER_CTX
-		ret = seccomp_rule_add(conf->seccomp_ctx, SCMP_ACT_ALLOW, nr, 0);
+		ret = seccomp_rule_add(conf->seccomp.seccomp_ctx, SCMP_ACT_ALLOW, nr, 0);
 #else
 		ret = seccomp_rule_add(SCMP_ACT_ALLOW, nr, 0);
 #endif
@@ -87,6 +109,10 @@ static const char *get_action_name(uint32_t action)
 		return "trap";
 	case SCMP_ACT_ERRNO(0):
 		return "errno";
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	case SCMP_ACT_NOTIFY:
+		return "notify";
+#endif
 	}
 
 	return "invalid action";
@@ -116,6 +142,10 @@ static uint32_t get_v2_default_action(char *line)
 		ret_action = SCMP_ACT_ALLOW;
 	} else if (strncmp(line, "trap", 4) == 0) {
 		ret_action = SCMP_ACT_TRAP;
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	} else if (strncmp(line, "notify", 6) == 0) {
+		ret_action = SCMP_ACT_NOTIFY;
+#endif
 	} else if (line[0]) {
 		ERROR("Unrecognized seccomp action \"%s\"", line);
 		return -2;
@@ -725,13 +755,13 @@ static int parse_config_v2(FILE *f, char *line, size_t *line_bufsz, struct lxc_c
 	}
 
 	if (default_policy_action != SCMP_ACT_KILL) {
-		ret = seccomp_reset(conf->seccomp_ctx, default_policy_action);
+		ret = seccomp_reset(conf->seccomp.seccomp_ctx, default_policy_action);
 		if (ret != 0) {
 			ERROR("Error re-initializing Seccomp");
 			return -1;
 		}
 
-		ret = seccomp_attr_set(conf->seccomp_ctx, SCMP_FLTATR_CTL_NNP, 0);
+		ret = seccomp_attr_set(conf->seccomp.seccomp_ctx, SCMP_FLTATR_CTL_NNP, 0);
 		if (ret < 0) {
 			errno = -ret;
 			SYSERROR("Failed to turn off no-new-privs");
@@ -739,7 +769,7 @@ static int parse_config_v2(FILE *f, char *line, size_t *line_bufsz, struct lxc_c
 		}
 
 #ifdef SCMP_FLTATR_ATL_TSKIP
-		ret = seccomp_attr_set(conf->seccomp_ctx, SCMP_FLTATR_ATL_TSKIP, 1);
+		ret = seccomp_attr_set(conf->seccomp.seccomp_ctx, SCMP_FLTATR_ATL_TSKIP, 1);
 		if (ret < 0) {
 			errno = -ret;
 			SYSWARN("Failed to turn on seccomp nop-skip, continuing");
@@ -928,8 +958,16 @@ static int parse_config_v2(FILE *f, char *line, size_t *line_bufsz, struct lxc_c
 			goto bad_rule;
 		}
 
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+		if ((rule.action == SCMP_ACT_NOTIFY) &&
+		    !conf->seccomp.notifier.wants_supervision) {
+			conf->seccomp.notifier.wants_supervision = true;
+			TRACE("Set SECCOMP_FILTER_FLAG_NEW_LISTENER attribute");
+		}
+#endif
+
 		if (!do_resolve_add_rule(SCMP_ARCH_NATIVE, line,
-					 conf->seccomp_ctx, &rule))
+					 conf->seccomp.seccomp_ctx, &rule))
 			goto bad_rule;
 
 		INFO("Added native rule for arch %d for %s action %d(%s)",
@@ -970,7 +1008,7 @@ static int parse_config_v2(FILE *f, char *line, size_t *line_bufsz, struct lxc_c
 	INFO("Merging compat seccomp contexts into main context");
 	if (ctx.contexts[0]) {
 		if (ctx.needs_merge[0]) {
-			ret = seccomp_merge(conf->seccomp_ctx, ctx.contexts[0]);
+			ret = seccomp_merge(conf->seccomp.seccomp_ctx, ctx.contexts[0]);
 			if (ret < 0) {
 				ERROR("Failed to merge first compat seccomp "
 				      "context into main context");
@@ -986,7 +1024,7 @@ static int parse_config_v2(FILE *f, char *line, size_t *line_bufsz, struct lxc_c
 
 	if (ctx.contexts[1]) {
 		if (ctx.needs_merge[1]) {
-			ret = seccomp_merge(conf->seccomp_ctx, ctx.contexts[1]);
+			ret = seccomp_merge(conf->seccomp.seccomp_ctx, ctx.contexts[1]);
 			if (ret < 0) {
 				ERROR("Failed to merge first compat seccomp "
 				      "context into main context");
@@ -1002,7 +1040,7 @@ static int parse_config_v2(FILE *f, char *line, size_t *line_bufsz, struct lxc_c
 
 	if (ctx.contexts[2]) {
 		if (ctx.needs_merge[2]) {
-			ret = seccomp_merge(conf->seccomp_ctx, ctx.contexts[2]);
+			ret = seccomp_merge(conf->seccomp.seccomp_ctx, ctx.contexts[2]);
 			if (ret < 0) {
 				ERROR("Failed to merge third compat seccomp "
 				      "context into main context");
@@ -1096,13 +1134,16 @@ bad_line:
  *   1. seccomp is not enabled in the kernel
  *   2. a seccomp policy is already enabled for this task
  */
-static bool use_seccomp(void)
+static bool use_seccomp(const struct lxc_conf *conf)
 {
 	int ret, v;
 	FILE *f;
 	size_t line_bufsz = 0;
 	char *line = NULL;
 	bool already_enabled = false, found = false;
+
+	if (conf->seccomp.allow_nesting > 0)
+		return true;
 
 	f = fopen("/proc/self/status", "r");
 	if (!f)
@@ -1140,16 +1181,16 @@ int lxc_read_seccomp_config(struct lxc_conf *conf)
 	int ret;
 	FILE *f;
 
-	if (!conf->seccomp)
+	if (!conf->seccomp.seccomp)
 		return 0;
 
-	if (!use_seccomp())
+	if (!use_seccomp(conf))
 		return 0;
 
 #if HAVE_SCMP_FILTER_CTX
 	/* XXX for debug, pass in SCMP_ACT_TRAP */
-	conf->seccomp_ctx = seccomp_init(SCMP_ACT_KILL);
-	ret = !conf->seccomp_ctx;
+	conf->seccomp.seccomp_ctx = seccomp_init(SCMP_ACT_KILL);
+	ret = !conf->seccomp.seccomp_ctx;
 #else
 	ret = seccomp_init(SCMP_ACT_KILL) < 0;
 #endif
@@ -1161,7 +1202,7 @@ int lxc_read_seccomp_config(struct lxc_conf *conf)
 /* turn off no-new-privs. We don't want it in lxc, and it breaks
  * with apparmor */
 #if HAVE_SCMP_FILTER_CTX
-	ret = seccomp_attr_set(conf->seccomp_ctx, SCMP_FLTATR_CTL_NNP, 0);
+	ret = seccomp_attr_set(conf->seccomp.seccomp_ctx, SCMP_FLTATR_CTL_NNP, 0);
 #else
 	ret = seccomp_attr_set(SCMP_FLTATR_CTL_NNP, 0);
 #endif
@@ -1172,16 +1213,16 @@ int lxc_read_seccomp_config(struct lxc_conf *conf)
 	}
 
 #ifdef SCMP_FLTATR_ATL_TSKIP
-	ret = seccomp_attr_set(conf->seccomp_ctx, SCMP_FLTATR_ATL_TSKIP, 1);
+	ret = seccomp_attr_set(conf->seccomp.seccomp_ctx, SCMP_FLTATR_ATL_TSKIP, 1);
 	if (ret < 0) {
 		errno = -ret;
 		SYSWARN("Failed to turn on seccomp nop-skip, continuing");
 	}
 #endif
 
-	f = fopen(conf->seccomp, "r");
+	f = fopen(conf->seccomp.seccomp, "r");
 	if (!f) {
-		SYSERROR("Failed to open seccomp policy file %s", conf->seccomp);
+		SYSERROR("Failed to open seccomp policy file %s", conf->seccomp.seccomp);
 		return -1;
 	}
 
@@ -1195,14 +1236,14 @@ int lxc_seccomp_load(struct lxc_conf *conf)
 {
 	int ret;
 
-	if (!conf->seccomp)
+	if (!conf->seccomp.seccomp)
 		return 0;
 
-	if (!use_seccomp())
+	if (!use_seccomp(conf))
 		return 0;
 
 #if HAVE_SCMP_FILTER_CTX
-	ret = seccomp_load(conf->seccomp_ctx);
+	ret = seccomp_load(conf->seccomp.seccomp_ctx);
 #else
 	ret = seccomp_load();
 #endif
@@ -1218,7 +1259,7 @@ int lxc_seccomp_load(struct lxc_conf *conf)
 	if ((lxc_log_get_level() <= LXC_LOG_LEVEL_TRACE ||
 	     conf->loglevel <= LXC_LOG_LEVEL_TRACE) &&
 	    lxc_log_fd >= 0) {
-		ret = seccomp_export_pfc(conf->seccomp_ctx, lxc_log_fd);
+		ret = seccomp_export_pfc(conf->seccomp.seccomp_ctx, lxc_log_fd);
 		/* Just give an warning when export error */
 		if (ret < 0) {
 			errno = -ret;
@@ -1227,18 +1268,352 @@ int lxc_seccomp_load(struct lxc_conf *conf)
 	}
 #endif
 
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	if (conf->seccomp.notifier.wants_supervision) {
+		ret = seccomp_notify_fd(conf->seccomp.seccomp_ctx);
+		if (ret < 0) {
+			errno = -ret;
+			return -1;
+		}
+
+		conf->seccomp.notifier.notify_fd = ret;
+		TRACE("Retrieved new seccomp listener fd %d", ret);
+	}
+#endif
+
 	return 0;
 }
 
-void lxc_seccomp_free(struct lxc_conf *conf)
+void lxc_seccomp_free(struct lxc_seccomp *seccomp)
 {
-	free(conf->seccomp);
-	conf->seccomp = NULL;
+	free_disarm(seccomp->seccomp);
 
 #if HAVE_SCMP_FILTER_CTX
-	if (conf->seccomp_ctx) {
-		seccomp_release(conf->seccomp_ctx);
-		conf->seccomp_ctx = NULL;
+	if (seccomp->seccomp_ctx) {
+		seccomp_release(seccomp->seccomp_ctx);
+		seccomp->seccomp_ctx = NULL;
 	}
 #endif
+
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	close_prot_errno_disarm(seccomp->notifier.notify_fd);
+	close_prot_errno_disarm(seccomp->notifier.proxy_fd);
+	seccomp_notify_free(seccomp->notifier.req_buf, seccomp->notifier.rsp_buf);
+	seccomp->notifier.req_buf = NULL;
+	seccomp->notifier.rsp_buf = NULL;
+#endif
+}
+
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+static int seccomp_notify_reconnect(struct lxc_handler *handler)
+{
+	__do_close_prot_errno int notify_fd = -EBADF;
+
+	close_prot_errno_disarm(handler->conf->seccomp.notifier.proxy_fd);
+
+	notify_fd = lxc_unix_connect_type(
+		&handler->conf->seccomp.notifier.proxy_addr, SOCK_SEQPACKET);
+	if (notify_fd < 0) {
+		SYSERROR("Failed to reconnect to seccomp proxy");
+		return -1;
+	}
+
+	/* 30 second timeout */
+	if (lxc_socket_set_timeout(notify_fd, 30, 30)) {
+		SYSERROR("Failed to set socket timeout");
+		return -1;
+	}
+	handler->conf->seccomp.notifier.proxy_fd = move_fd(notify_fd);
+	return 0;
+}
+#endif
+
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+static void seccomp_notify_default_answer(int fd, struct seccomp_notif *req,
+					  struct seccomp_notif_resp *resp,
+					  struct lxc_handler *handler)
+{
+	resp->id = req->id;
+	resp->error = -ENOSYS;
+
+	if (seccomp_notify_respond(fd, resp))
+		SYSERROR("Failed to send default message to seccomp");
+}
+#endif
+
+int seccomp_notify_handler(int fd, uint32_t events, void *data,
+			   struct lxc_epoll_descr *descr)
+{
+
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	__do_close_prot_errno int fd_pid = -EBADF;
+	__do_close_prot_errno int fd_mem = -EBADF;
+	int ret;
+	ssize_t bytes;
+	int send_fd_list[2];
+	struct iovec iov[4];
+	size_t iov_len, msg_base_size, msg_full_size;
+	char mem_path[6 /* /proc/ */
+		      + INTTYPE_TO_STRLEN(int64_t)
+		      + 3 /* mem */
+		      + 1 /* \0 */];
+	bool reconnected = false;
+	struct lxc_handler *hdlr = data;
+	struct lxc_conf *conf = hdlr->conf;
+	struct seccomp_notif *req = conf->seccomp.notifier.req_buf;
+	struct seccomp_notif_resp *resp = conf->seccomp.notifier.rsp_buf;
+	int listener_proxy_fd = conf->seccomp.notifier.proxy_fd;
+	struct seccomp_notify_proxy_msg msg = {0};
+	char *cookie = conf->seccomp.notifier.cookie;
+	uint64_t req_id;
+
+	ret = seccomp_notify_receive(fd, req);
+	if (ret) {
+		SYSERROR("Failed to read seccomp notification");
+		goto out;
+	}
+
+	if (listener_proxy_fd < 0) {
+		ret = -1;
+		/* Same condition as for the initial setup_proxy() */
+		if (conf->seccomp.notifier.wants_supervision &&
+		    conf->seccomp.notifier.proxy_addr.sun_path[1] != '\0') {
+			ret = seccomp_notify_reconnect(hdlr);
+		}
+		if (ret) {
+			ERROR("No seccomp proxy registered");
+			seccomp_notify_default_answer(fd, req, resp, hdlr);
+			goto out;
+		}
+		listener_proxy_fd = conf->seccomp.notifier.proxy_fd;
+	}
+
+	/* remember the ID in case we receive garbage from the proxy */
+	resp->id = req_id = req->id;
+
+	snprintf(mem_path, sizeof(mem_path), "/proc/%d", req->pid);
+	fd_pid = open(mem_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (fd_pid < 0) {
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		SYSERROR("Failed to open process pidfd for seccomp notify request");
+		goto out;
+	}
+
+	snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", req->pid);
+	fd_mem = open(mem_path, O_RDWR | O_CLOEXEC);
+	if (fd_mem < 0) {
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		SYSERROR("Failed to open process memory for seccomp notify request");
+		goto out;
+	}
+
+	/*
+	 * Make sure that the fd for /proc/<pid>/mem we just opened still
+	 * refers to the correct process's memory.
+	 */
+	ret = seccomp_notify_id_valid(fd, req->id);
+	if (ret < 0) {
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		SYSERROR("Invalid seccomp notify request id");
+		goto out;
+	}
+
+	msg.monitor_pid = hdlr->monitor_pid;
+	msg.init_pid = hdlr->pid;
+	memcpy(&msg.sizes, &conf->seccomp.notifier.sizes, sizeof(msg.sizes));
+
+	msg_base_size = 0;
+	iov[0].iov_base = &msg;
+	msg_base_size += (iov[0].iov_len = sizeof(msg));
+	iov[1].iov_base = req;
+	msg_base_size += (iov[1].iov_len = msg.sizes.seccomp_notif);
+	iov[2].iov_base = resp;
+	msg_base_size += (iov[2].iov_len = msg.sizes.seccomp_notif_resp);
+	msg_full_size = msg_base_size;
+
+	if (cookie) {
+		size_t len = strlen(cookie);
+
+		msg.cookie_len = (uint64_t)len;
+
+		iov[3].iov_base = cookie;
+		msg_full_size += (iov[3].iov_len = len);
+
+		iov_len = 4;
+	} else {
+		iov_len = 3;
+	}
+
+	send_fd_list[0] = fd_pid;
+	send_fd_list[1] = fd_mem;
+
+retry:
+	bytes = lxc_abstract_unix_send_fds_iov(listener_proxy_fd, send_fd_list,
+					       2, iov, iov_len);
+	if (bytes != (ssize_t)msg_full_size) {
+		SYSERROR("Failed to forward message to seccomp proxy");
+		if (!reconnected) {
+			ret = seccomp_notify_reconnect(hdlr);
+			if (ret == 0) {
+				reconnected = true;
+				goto retry;
+			}
+		}
+
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		goto out;
+	}
+
+	close_prot_errno_disarm(fd_mem);
+
+	if (msg.__reserved != 0) {
+		ERROR("Proxy filled reserved data in response");
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		goto out;
+	}
+
+	if (resp->id != req_id) {
+		resp->id = req_id;
+		ERROR("Proxy returned response with illegal id");
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		goto out;
+	}
+
+	bytes = lxc_recvmsg_nointr_iov(listener_proxy_fd, iov, iov_len, MSG_TRUNC);
+	if (bytes != (ssize_t)msg_base_size) {
+		SYSERROR("Failed to receive message from seccomp proxy");
+		seccomp_notify_default_answer(fd, req, resp, hdlr);
+		goto out;
+	}
+
+	ret = seccomp_notify_respond(fd, resp);
+	if (ret)
+		SYSERROR("Failed to send seccomp notification");
+
+out:
+	return 0;
+#else
+	return -ENOSYS;
+#endif
+}
+
+void seccomp_conf_init(struct lxc_conf *conf)
+{
+	conf->seccomp.seccomp = NULL;
+#if HAVE_SCMP_FILTER_CTX
+	conf->seccomp.allow_nesting = 0;
+	memset(&conf->seccomp.seccomp_ctx, 0, sizeof(conf->seccomp.seccomp_ctx));
+#endif /* HAVE_SCMP_FILTER_CTX */
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	conf->seccomp.notifier.wants_supervision = false;
+	conf->seccomp.notifier.notify_fd = -EBADF;
+	conf->seccomp.notifier.proxy_fd = -EBADF;
+	memset(&conf->seccomp.notifier.proxy_addr, 0,
+	       sizeof(conf->seccomp.notifier.proxy_addr));
+	conf->seccomp.notifier.req_buf = NULL;
+	conf->seccomp.notifier.rsp_buf = NULL;
+#endif
+}
+
+int lxc_seccomp_setup_proxy(struct lxc_seccomp *seccomp,
+			    struct lxc_epoll_descr *descr,
+			    struct lxc_handler *handler)
+{
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	if (seccomp->notifier.wants_supervision &&
+	    seccomp->notifier.proxy_addr.sun_path[1] != '\0') {
+		__do_close_prot_errno int notify_fd = -EBADF;
+		int ret;
+
+		notify_fd = lxc_unix_connect_type(&seccomp->notifier.proxy_addr,
+					     SOCK_SEQPACKET);
+		if (notify_fd < 0) {
+			SYSERROR("Failed to connect to seccomp proxy");
+			return -1;
+		}
+
+		/* 30 second timeout */
+		ret = lxc_socket_set_timeout(notify_fd, 30, 30);
+		if (ret) {
+			SYSERROR("Failed to set timeouts for seccomp proxy");
+			return -1;
+		}
+
+		ret = __seccomp(SECCOMP_GET_NOTIF_SIZES, 0,
+				&seccomp->notifier.sizes);
+		if (ret) {
+			SYSERROR("Failed to query seccomp notify struct sizes");
+			return -1;
+		}
+
+		ret = seccomp_notify_alloc(&seccomp->notifier.req_buf,
+					  &seccomp->notifier.rsp_buf);
+		if (ret) {
+			ERROR("Failed to allocate seccomp notify request and response buffers");
+			errno = ret;
+			return -1;
+		}
+
+		ret = lxc_mainloop_add_handler(descr,
+					       seccomp->notifier.notify_fd,
+					       seccomp_notify_handler, handler);
+		if (ret < 0) {
+			ERROR("Failed to add seccomp notify handler for %d to mainloop",
+			      notify_fd);
+			return -1;
+		}
+
+		seccomp->notifier.proxy_fd = move_fd(notify_fd);
+	}
+#endif
+	return 0;
+}
+
+int lxc_seccomp_send_notifier_fd(struct lxc_seccomp *seccomp, int socket_fd)
+{
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	if (seccomp->notifier.wants_supervision) {
+		if (lxc_abstract_unix_send_fds(socket_fd,
+					       &seccomp->notifier.notify_fd, 1,
+					       NULL, 0) < 0)
+			return -1;
+		close_prot_errno_disarm(seccomp->notifier.notify_fd);
+	}
+#endif
+	return 0;
+}
+
+int lxc_seccomp_recv_notifier_fd(struct lxc_seccomp *seccomp, int socket_fd)
+{
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	if (seccomp->notifier.wants_supervision) {
+		int ret;
+
+		ret = lxc_abstract_unix_recv_fds(socket_fd,
+						 &seccomp->notifier.notify_fd,
+						 1, NULL, 0);
+		if (ret < 0)
+			return -1;
+	}
+#endif
+	return 0;
+}
+
+int lxc_seccomp_add_notifier(const char *name, const char *lxcpath,
+			     struct lxc_seccomp *seccomp)
+{
+
+#if HAVE_DECL_SECCOMP_NOTIFY_FD
+	if (seccomp->notifier.wants_supervision) {
+		int ret;
+
+		ret = lxc_cmd_seccomp_notify_add_listener(name, lxcpath,
+							  seccomp->notifier.notify_fd,
+							  -1, 0);
+		close_prot_errno_disarm(seccomp->notifier.notify_fd);
+		if (ret < 0)
+			return -1;
+	}
+#endif
+	return 0;
 }

@@ -38,6 +38,7 @@
 #include "compiler.h"
 #include "config.h"
 #include "list.h"
+#include "lxcseccomp.h"
 #include "ringbuf.h"
 #include "start.h"
 #include "terminal.h"
@@ -295,10 +296,7 @@ struct lxc_conf {
 	struct lxc_list lsm_aa_raw;
 	char *lsm_se_context;
 	bool tmp_umount_proc;
-	char *seccomp;  /* filename with the seccomp rules */
-#if HAVE_SCMP_FILTER_CTX
-	scmp_filter_ctx seccomp_ctx;
-#endif
+	struct lxc_seccomp seccomp;
 	int maincmd_fd;
 	unsigned int autodev;  /* if 1, mount and fill a /dev at start */
 	int haltsignal; /* signal used to halt container */
@@ -461,5 +459,6 @@ extern int lxc_clear_sysctls(struct lxc_conf *c, const char *key);
 extern int setup_proc_filesystem(struct lxc_list *procs, pid_t pid);
 extern int lxc_clear_procs(struct lxc_conf *c, const char *key);
 extern int lxc_clear_apparmor_raw(struct lxc_conf *c);
+extern int lxc_clear_namespace(struct lxc_conf *c);
 
 #endif /* __LXC_CONF_H */

@@ -1,20 +1,20 @@
 #                                               -*- Autoconf -*-
 # Process this file with autoconf to produce a configure script.
 
-m4_define([lxc_devel], 0)
+m4_define([lxc_devel], 1)
 m4_define([lxc_version_major], 3)
-m4_define([lxc_version_minor], 1)
+m4_define([lxc_version_minor], 2)
 m4_define([lxc_version_micro], 0)
 m4_define([lxc_version_beta], [])
 
 m4_define([lxc_abi_major], 1)
-m4_define([lxc_abi_minor], 5)
+m4_define([lxc_abi_minor], 6)
 m4_define([lxc_abi_micro], 0)
 m4_define([lxc_abi], [lxc_abi_major.lxc_abi_minor.lxc_abi_micro])
 
 m4_define([lxc_version_base], [lxc_version_major.lxc_version_minor.lxc_version_micro])
 m4_define([lxc_version],
-	  [ifelse(lxc_devel, 1,
+       [ifelse(lxc_devel, 1,
         ifelse(lxc_version_beta, [], [lxc_version_base], [lxc_version_base.lxc_version_beta])-devel,
         ifelse(lxc_version_beta, [], [lxc_version_base], [lxc_version_base.lxc_version_beta]))])
 
@@ -257,6 +257,8 @@ fi
 
 AM_CONDITIONAL([ENABLE_API_DOCS], [test "x$HAVE_DOXYGEN" != "x"])
 
+AC_CONFIG_MACRO_DIRS([config])
+
 # Apparmor
 AC_ARG_ENABLE([apparmor],
 	[AC_HELP_STRING([--enable-apparmor], [enable apparmor support [default=auto]])],
@@ -267,20 +269,21 @@ if test "$enable_apparmor" = "auto" ; then
 fi
 AM_CONDITIONAL([ENABLE_APPARMOR], [test "x$enable_apparmor" = "xyes"])
 
-# GnuTLS
-AC_ARG_ENABLE([gnutls],
-	[AC_HELP_STRING([--enable-gnutls], [enable GnuTLS support [default=auto]])],
-	[], [enable_gnutls=auto])
+# OpenSSL
+# libssl-dev
+AC_ARG_ENABLE([openssl],
+	[AC_HELP_STRING([--enable-openssl], [enable OpenSSL support [default=auto]])],
+	[], [enable_openssl=auto])
 
-if test "$enable_gnutls" = "auto" ; then
-	AC_CHECK_LIB([gnutls], [gnutls_hash_fast], [enable_gnutls=yes], [enable_gnutls=no])
+if test "$enable_openssl" = "auto" ; then
+	AC_CHECK_LIB([ssl], [OPENSSL_init_ssl], [enable_openssl=yes], [enable_openssl=no])
+
 fi
-AM_CONDITIONAL([ENABLE_GNUTLS], [test "x$enable_gnutls" = "xyes"])
+AM_CONDITIONAL([ENABLE_OPENSSL], [test "x$enable_openssl" = "xyes"])
 
-AM_COND_IF([ENABLE_GNUTLS],
-	[AC_CHECK_HEADER([gnutls/gnutls.h],[],[AC_MSG_ERROR([You must install the GnuTLS development package in order to compile lxc])])
-	AC_CHECK_LIB([gnutls], [gnutls_hash_fast],[true],[AC_MSG_ERROR([You must install the GnuTLS development package in order to compile lxc])])
-	AC_SUBST([GNUTLS_LIBS], [-lgnutls])])
+AM_COND_IF([ENABLE_OPENSSL],
+	[AC_CHECK_HEADER([openssl/engine.h],[],[AC_MSG_ERROR([You must install the OpenSSL development package in order to compile lxc])])
+	AC_SUBST([OPENSSL_LIBS], '-lssl -lcrypto')])
 
 # SELinux
 AC_ARG_ENABLE([selinux],
@@ -363,6 +366,8 @@ AM_COND_IF([ENABLE_CAP],
 OLD_CFLAGS="$CFLAGS"
 CFLAGS="$CFLAGS $SECCOMP_CFLAGS"
 AC_CHECK_TYPES([scmp_filter_ctx], [], [], [[#include <seccomp.h>]])
+AC_CHECK_DECLS([seccomp_notify_fd], [], [], [[#include <seccomp.h>]])
+AC_CHECK_TYPES([struct seccomp_notif_sizes], [], [], [[#include <seccomp.h>]])
 AC_CHECK_DECLS([seccomp_syscall_resolve_name_arch], [], [], [[#include <seccomp.h>]])
 CFLAGS="$OLD_CFLAGS"
 
@@ -427,6 +432,12 @@ AC_ARG_ENABLE([commands],
 	[AC_HELP_STRING([--enable-commands], [build the liblxc commands [default=yes]])],
 	[], [enable_commands=yes])
 AM_CONDITIONAL([ENABLE_COMMANDS], [test "x$enable_commands" = "xyes"])
+
+# Build with ASAN commands
+AC_ARG_ENABLE([asan],
+	[AC_HELP_STRING([--enable-asan], [build with address sanitizer enabled [default=no]])],
+	[], [enable_asan=no])
+AM_CONDITIONAL([ENABLE_ASAN], [test "x$enable_asan" = "xyes"])
 
 # Optional test binaries
 AC_ARG_ENABLE([tests],
@@ -630,6 +641,33 @@ AC_CHECK_FUNCS([setns pivot_root sethostname unshare rand_r confstr faccessat ge
 # - STRERROR_R_CHAR_P if it returns char *
 AC_FUNC_STRERROR_R
 
+# Check if "%m" is supported by printf and Co
+AC_MSG_CHECKING([%m format])
+AC_TRY_RUN([
+#include <stdio.h>
+int main(void)
+{
+  char msg[256];
+  int rc;
+
+  rc = snprintf(msg, sizeof(msg), "%m\n");
+  if ((rc > 1) && (msg[0] != '%'))
+  {
+    return 0;
+  }
+  else
+  {
+    return 1;
+  }
+}],
+[fmt_m=yes], [fmt_m=no], [fmt_m=no])
+if test "x$fmt_m" = "xyes"; then
+	AC_DEFINE([HAVE_M_FORMAT], 1, [Have %m format])
+	AC_MSG_RESULT([yes])
+else
+	AC_MSG_RESULT([no])
+fi
+
 # Check for some functions
 AC_CHECK_LIB(pthread, main)
 AC_CHECK_FUNCS(statvfs)
@@ -690,19 +728,41 @@ AC_PROG_SED
 # See if we support thread-local storage.
 LXC_CHECK_TLS
 
+# Hardening flags
 AX_CHECK_COMPILE_FLAG([-fdiagnostics-color], [CFLAGS="$CFLAGS -fdiagnostics-color"],,[-Werror])
-AX_CHECK_COMPILE_FLAG([-Wimplicit-fallthrough], [CFLAGS="$CFLAGS -Wimplicit-fallthrough"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wimplicit-fallthrough=5], [CFLAGS="$CFLAGS -Wimplicit-fallthrough=5"],,[-Werror])
 AX_CHECK_COMPILE_FLAG([-Wcast-align], [CFLAGS="$CFLAGS -Wcast-align"],,[-Werror])
 AX_CHECK_COMPILE_FLAG([-Wstrict-prototypes], [CFLAGS="$CFLAGS -Wstrict-prototypes"],,[-Werror])
 AX_CHECK_COMPILE_FLAG([-fno-strict-aliasing], [CFLAGS="$CFLAGS -fno-strict-aliasing"],,[-Werror])
 AX_CHECK_COMPILE_FLAG([-fstack-clash-protection], [CFLAGS="$CFLAGS -fstack-clash-protection"],,[-Werror])
-AX_CHECK_LINK_FLAG([-fstack-protector-strong], [CFLAGS="$CFLAGS -fstack-protector-strong"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-fstack-protector-strong], [CFLAGS="$CFLAGS -fstack-protector-strong"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([--param=ssp-buffer-size=4], [CFLAGS="$CFLAGS --param=ssp-buffer-size=4"],,[-Werror])
 AX_CHECK_COMPILE_FLAG([-g], [CFLAGS="$CFLAGS -g"],,[-Werror])
 AX_CHECK_COMPILE_FLAG([--mcet -fcf-protection], [CFLAGS="$CFLAGS --mcet -fcf-protection"],,[-Werror])
 AX_CHECK_COMPILE_FLAG([-Werror=implicit-function-declaration], [CFLAGS="$CFLAGS -Werror=implicit-function-declaration"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wlogical-op], [CFLAGS="$CFLAGS -Wlogical-op"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wmissing-include-dirs], [CFLAGS="$CFLAGS -Wmissing-include-dirs"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wold-style-definition], [CFLAGS="$CFLAGS -Wold-style-definition"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Winit-self], [CFLAGS="$CFLAGS -Winit-self"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wfloat-equal], [CFLAGS="$CFLAGS -Wfloat-equal"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wsuggest-attribute=noreturn], [CFLAGS="$CFLAGS -Wsuggest-attribute=noreturn"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Werror=return-type], [CFLAGS="$CFLAGS -Werror=return-type"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Werror=incompatible-pointer-types], [CFLAGS="$CFLAGS -Werror=incompatible-pointer-types"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wformat=2], [CFLAGS="$CFLAGS -Wformat=2"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wshadow], [CFLAGS="$CFLAGS -Wshadow"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wendif-labels], [CFLAGS="$CFLAGS -Wendif-labels"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Werror=overflow], [CFLAGS="$CFLAGS -Werror=overflow"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-fdiagnostics-show-option], [CFLAGS="$CFLAGS -fdiagnostics-show-option"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Werror=shift-count-overflow], [CFLAGS="$CFLAGS -Werror=shift-count-overflow"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Werror=shift-overflow=2], [CFLAGS="$CFLAGS -Werror=shift-overflow=2"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wdate-time], [CFLAGS="$CFLAGS -Wdate-time"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-Wnested-externs], [CFLAGS="$CFLAGS -Wnested-externs"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-fasynchronous-unwind-tables], [CFLAGS="$CFLAGS -fasynchronous-unwind-tables"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-pipe], [CFLAGS="$CFLAGS -pipe"],,[-Werror])
+AX_CHECK_COMPILE_FLAG([-fexceptions], [CFLAGS="$CFLAGS -fexceptions"],,[-Werror])
 
-AX_CHECK_LINK_FLAG([-z relro], [LDLAGS="$LDLAGS -z relro"],,[])
-AX_CHECK_LINK_FLAG([-z now], [LDLAGS="$LDLAGS -z now"],,[])
+AX_CHECK_LINK_FLAG([-z relro], [LDFLAGS="$LDFLAGS -z relro"],,[])
+AX_CHECK_LINK_FLAG([-z now], [LDFLAGS="$LDFLAGS -z now"],,[])
 
 CFLAGS="$CFLAGS -Wvla -std=gnu11"
 if test "x$enable_werror" = "xyes"; then
@@ -726,6 +786,17 @@ AM_COND_IF([ENABLE_DLOG],
 		AC_SUBST([DLOG_LIBS], [-ldlog])
 		])
 	])
+
+AC_ARG_ENABLE([memfd-rexec],
+	[AC_HELP_STRING([--enable-memfd-rexec], [enforce liblxc as a memfd to protect against certain symlink attacks [default=yes]])],
+	[], [enable_memfd_rexec=yes])
+AM_CONDITIONAL([ENFORCE_MEMFD_REXEC], [test "x$enable_memfd_rexec" = "xyes"])
+if test "x$enable_memfd_rexec" = "xyes"; then
+	AC_DEFINE([ENFORCE_MEMFD_REXEC], 1, [Rexec liblxc as memfd])
+	AC_MSG_RESULT([yes])
+else
+	AC_MSG_RESULT([no])
+fi
 
 # Files requiring some variable expansion
 AC_CONFIG_FILES([
@@ -947,7 +1018,7 @@ Environment:
  - distribution: $with_distro
  - init script type(s): $init_script
  - rpath: $enable_rpath
- - GnuTLS: $enable_gnutls
+ - OpenSSL: $enable_openssl
  - Bash integration: $enable_bash
 
 Security features:
@@ -955,6 +1026,7 @@ Security features:
  - Linux capabilities: $enable_capabilities
  - seccomp: $enable_seccomp
  - SELinux: $enable_selinux
+ - memfd rexec: $enable_memfd_rexec
 
 PAM:
  - PAM module: $enable_pam
@@ -967,6 +1039,7 @@ Documentation:
 
 Debugging:
  - tests: $enable_tests
+ - ASAN: $enable_asan
  - mutex debugging: $enable_mutex_debugging
 
 Paths:

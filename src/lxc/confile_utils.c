@@ -299,6 +299,17 @@ void lxc_log_configured_netdevs(const struct lxc_conf *conf)
 				      mode ? mode : "(invalid mode)");
 			}
 			break;
+		case LXC_NET_IPVLAN:
+			TRACE("type: ipvlan");
+
+			char *mode;
+			mode = lxc_ipvlan_flag_to_mode(netdev->priv.ipvlan_attr.mode);
+			TRACE("ipvlan mode: %s", mode ? mode : "(invalid mode)");
+
+			char *isolation;
+			isolation = lxc_ipvlan_flag_to_isolation(netdev->priv.ipvlan_attr.isolation);
+			TRACE("ipvlan isolation: %s", isolation ? isolation : "(invalid isolation)");
+			break;
 		case LXC_NET_VLAN:
 			TRACE("type: vlan");
 			TRACE("vlan id: %d", netdev->priv.vlan_attr.vid);
@@ -317,7 +328,7 @@ void lxc_log_configured_netdevs(const struct lxc_conf *conf)
 			TRACE("type: none");
 			break;
 		default:
-			ERROR("invalid network type %d", netdev->type);
+			ERROR("Invalid network type %d", netdev->type);
 			return;
 		}
 
@@ -327,6 +338,10 @@ void lxc_log_configured_netdevs(const struct lxc_conf *conf)
 
 			if (netdev->link[0] != '\0')
 				TRACE("link: %s", netdev->link);
+
+			/* l2proxy only used when link is specified */
+			if (netdev->link[0] != '\0')
+				TRACE("l2proxy: %s", netdev->l2proxy ? "true" : "false");
 
 			if (netdev->name[0] != '\0')
 				TRACE("name: %s", netdev->name);
@@ -346,6 +361,9 @@ void lxc_log_configured_netdevs(const struct lxc_conf *conf)
 			TRACE("ipv4 gateway auto: %s",
 			      netdev->ipv4_gateway_auto ? "true" : "false");
 
+			TRACE("ipv4 gateway dev: %s",
+			      netdev->ipv4_gateway_dev ? "true" : "false");
+
 			if (netdev->ipv4_gateway) {
 				inet_ntop(AF_INET, netdev->ipv4_gateway,
 					  bufinet4, sizeof(bufinet4));
@@ -362,6 +380,9 @@ void lxc_log_configured_netdevs(const struct lxc_conf *conf)
 			TRACE("ipv6 gateway auto: %s",
 			      netdev->ipv6_gateway_auto ? "true" : "false");
 
+			TRACE("ipv6 gateway dev: %s",
+			      netdev->ipv6_gateway_dev ? "true" : "false");
+
 			if (netdev->ipv6_gateway) {
 				inet_ntop(AF_INET6, netdev->ipv6_gateway,
 					  bufinet6, sizeof(bufinet6));
@@ -373,6 +394,28 @@ void lxc_log_configured_netdevs(const struct lxc_conf *conf)
 				inet_ntop(AF_INET6, &inet6dev->addr, bufinet6,
 					  sizeof(bufinet6));
 				TRACE("ipv6 addr: %s", bufinet6);
+			}
+
+			if (netdev->type == LXC_NET_VETH) {
+				lxc_list_for_each_safe(cur, &netdev->priv.veth_attr.ipv4_routes, next) {
+					inet4dev = cur->elem;
+					if (!inet_ntop(AF_INET, &inet4dev->addr, bufinet4, sizeof(bufinet4))) {
+						ERROR("Invalid ipv4 veth route");
+						return;
+					}
+
+					TRACE("ipv4 veth route: %s/%u", bufinet4, inet4dev->prefix);
+				}
+
+				lxc_list_for_each_safe(cur, &netdev->priv.veth_attr.ipv6_routes, next) {
+					inet6dev = cur->elem;
+					if (!inet_ntop(AF_INET6, &inet6dev->addr, bufinet6, sizeof(bufinet6))) {
+						ERROR("Invalid ipv6 veth route");
+						return;
+					}
+
+					TRACE("ipv6 veth route: %s/%u", bufinet6, inet6dev->prefix);
+				}
 			}
 		}
 	}
@@ -399,6 +442,20 @@ static void lxc_free_netdev(struct lxc_netdev *netdev)
 		lxc_list_del(cur);
 		free(cur->elem);
 		free(cur);
+	}
+
+	if (netdev->type == LXC_NET_VETH) {
+		lxc_list_for_each_safe(cur, &netdev->priv.veth_attr.ipv4_routes, next) {
+			lxc_list_del(cur);
+			free(cur->elem);
+			free(cur);
+		}
+
+		lxc_list_for_each_safe(cur, &netdev->priv.veth_attr.ipv6_routes, next) {
+			lxc_list_del(cur);
+			free(cur->elem);
+			free(cur);
+		}
 	}
 
 	free(netdev);
@@ -444,6 +501,28 @@ void lxc_free_networks(struct lxc_list *networks)
 	lxc_list_init(networks);
 }
 
+
+static struct lxc_veth_mode {
+	char *name;
+	int mode;
+} veth_mode[] = {
+    { "bridge", VETH_MODE_BRIDGE },
+    { "router", VETH_MODE_ROUTER },
+};
+
+int lxc_veth_mode_to_flag(int *mode, const char *value)
+{
+	for (size_t i = 0; i < sizeof(veth_mode) / sizeof(veth_mode[0]); i++) {
+		if (strcmp(veth_mode[i].name, value) != 0)
+			continue;
+
+		*mode = veth_mode[i].mode;
+		return 0;
+	}
+
+	return minus_one_set_errno(EINVAL);
+}
+
 static struct lxc_macvlan_mode {
 	char *name;
 	int mode;
@@ -474,10 +553,78 @@ char *lxc_macvlan_flag_to_mode(int mode)
 	size_t i;
 
 	for (i = 0; i < sizeof(macvlan_mode) / sizeof(macvlan_mode[0]); i++) {
-		if (macvlan_mode[i].mode == mode)
+		if (macvlan_mode[i].mode != mode)
 			continue;
 
 		return macvlan_mode[i].name;
+	}
+
+	return NULL;
+}
+
+static struct lxc_ipvlan_mode {
+	char *name;
+	int mode;
+} ipvlan_mode[] = {
+    { "l3",  IPVLAN_MODE_L3  },
+    { "l3s", IPVLAN_MODE_L3S },
+    { "l2",  IPVLAN_MODE_L2  },
+};
+
+int lxc_ipvlan_mode_to_flag(int *mode, const char *value)
+{
+	for (size_t i = 0; i < sizeof(ipvlan_mode) / sizeof(ipvlan_mode[0]); i++) {
+		if (strcmp(ipvlan_mode[i].name, value) != 0)
+			continue;
+
+		*mode = ipvlan_mode[i].mode;
+		return 0;
+	}
+
+	return -1;
+}
+
+char *lxc_ipvlan_flag_to_mode(int mode)
+{
+	for (size_t i = 0; i < sizeof(ipvlan_mode) / sizeof(ipvlan_mode[0]); i++) {
+		if (ipvlan_mode[i].mode != mode)
+			continue;
+
+		return ipvlan_mode[i].name;
+	}
+
+	return NULL;
+}
+
+static struct lxc_ipvlan_isolation {
+	char *name;
+	int flag;
+} ipvlan_isolation[] = {
+    { "bridge",  IPVLAN_ISOLATION_BRIDGE  },
+    { "private", IPVLAN_ISOLATION_PRIVATE },
+    { "vepa",    IPVLAN_ISOLATION_VEPA    },
+};
+
+int lxc_ipvlan_isolation_to_flag(int *flag, const char *value)
+{
+	for (size_t i = 0; i < sizeof(ipvlan_isolation) / sizeof(ipvlan_isolation[0]); i++) {
+		if (strcmp(ipvlan_isolation[i].name, value) != 0)
+			continue;
+
+		*flag = ipvlan_isolation[i].flag;
+		return 0;
+	}
+
+	return -1;
+}
+
+char *lxc_ipvlan_flag_to_isolation(int flag)
+{
+	for (size_t i = 0; i < sizeof(ipvlan_isolation) / sizeof(ipvlan_isolation[0]); i++) {
+		if (ipvlan_isolation[i].flag != flag)
+			continue;
+
+		return ipvlan_isolation[i].name;
 	}
 
 	return NULL;
@@ -548,6 +695,27 @@ int network_ifname(char *valuep, const char *value, size_t size)
 	return 0;
 }
 
+bool lxc_config_net_is_hwaddr(const char *line)
+{
+	unsigned index;
+	char tmp[7];
+
+	if (strncmp(line, "lxc.net", 7) != 0)
+		return false;
+
+	if (strncmp(line, "lxc.net.hwaddr", 14) == 0)
+		return true;
+
+	if (strncmp(line, "lxc.network.hwaddr", 18) == 0)
+		return true;
+
+	if (sscanf(line, "lxc.net.%u.%6s", &index, tmp) == 2 ||
+	    sscanf(line, "lxc.network.%u.%6s", &index, tmp) == 2)
+		return strncmp(tmp, "hwaddr", 6) == 0;
+
+	return false;
+}
+
 void rand_complete_hwaddr(char *hwaddr)
 {
 	const char hex[] = "0123456789abcdef";
@@ -578,61 +746,6 @@ void rand_complete_hwaddr(char *hwaddr)
 		}
 		curs++;
 	}
-}
-
-bool lxc_config_net_hwaddr(const char *line)
-{
-	unsigned index;
-	char tmp[7];
-
-	if (strncmp(line, "lxc.net", 7) != 0)
-		return false;
-
-	if (strncmp(line, "lxc.net.hwaddr", 14) == 0)
-		return true;
-
-	if (strncmp(line, "lxc.network.hwaddr", 18) == 0)
-		return true;
-
-	if (sscanf(line, "lxc.net.%u.%6s", &index, tmp) == 2 ||
-	    sscanf(line, "lxc.network.%u.%6s", &index, tmp) == 2)
-		return strncmp(tmp, "hwaddr", 6) == 0;
-
-	return false;
-}
-
-/*
- * If we find a lxc.net.[i].hwaddr or lxc.network.hwaddr in the original config
- * file, we expand it in the unexpanded_config, so that after a save_config we
- * store the hwaddr for re-use.
- * This is only called when reading the config file, not when executing a
- * lxc.include.
- * 'x' and 'X' are substituted in-place.
- */
-void update_hwaddr(const char *line)
-{
-	char *p;
-
-	line += lxc_char_left_gc(line, strlen(line));
-	if (line[0] == '#')
-		return;
-
-	if (!lxc_config_net_hwaddr(line))
-		return;
-
-	/* Let config_net_hwaddr raise the error. */
-	p = strchr(line, '=');
-	if (!p)
-		return;
-	p++;
-
-	while (isblank(*p))
-		p++;
-
-	if (!*p)
-		return;
-
-	rand_complete_hwaddr(p);
 }
 
 bool new_hwaddr(char *hwaddr)
@@ -734,26 +847,6 @@ int lxc_get_conf_uint64(struct lxc_conf *c, char *retv, int inlen, uint64_t v)
 	return fulllen;
 }
 
-bool parse_limit_value(const char **value, rlim_t *res)
-{
-	char *endptr = NULL;
-
-	if (strncmp(*value, "unlimited", STRLITERALLEN("unlimited")) == 0) {
-		*res = RLIM_INFINITY;
-		*value += STRLITERALLEN("unlimited");
-		return true;
-	}
-
-	errno = 0;
-	*res = strtoull(*value, &endptr, 10);
-	if (errno || !endptr)
-		return false;
-
-	*value = endptr;
-
-	return true;
-}
-
 static int lxc_container_name_to_pid(const char *lxcname_or_pid,
 				     const char *lxcpath)
 {
@@ -798,23 +891,27 @@ static int lxc_container_name_to_pid(const char *lxcname_or_pid,
 	return pid;
 }
 
-int lxc_inherit_namespace(const char *lxcname_or_pid, const char *lxcpath,
+int lxc_inherit_namespace(const char *nsfd_path, const char *lxcpath,
 			  const char *namespace)
 {
 	int fd, pid;
 	char *dup, *lastslash;
 
-	lastslash = strrchr(lxcname_or_pid, '/');
+	if (nsfd_path[0] == '/') {
+		return open(nsfd_path, O_RDONLY | O_CLOEXEC);
+	}
+
+	lastslash = strrchr(nsfd_path, '/');
 	if (lastslash) {
-		dup = strdup(lxcname_or_pid);
+		dup = strdup(nsfd_path);
 		if (!dup)
 			return -1;
 
-		dup[lastslash - lxcname_or_pid] = '\0';
+		dup[lastslash - nsfd_path] = '\0';
 		pid = lxc_container_name_to_pid(lastslash + 1, dup);
 		free(dup);
 	} else {
-		pid = lxc_container_name_to_pid(lxcname_or_pid, lxcpath);
+		pid = lxc_container_name_to_pid(nsfd_path, lxcpath);
 	}
 
 	if (pid < 0)

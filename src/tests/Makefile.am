@@ -15,6 +15,7 @@ lxc_test_console_log_SOURCES = console_log.c lxctest.h
 lxc_test_containertests_SOURCES = containertests.c
 lxc_test_createtest_SOURCES = createtest.c
 lxc_test_criu_check_feature_SOURCES = criu_check_feature.c lxctest.h
+lxc_test_cve_2019_5736_SOURCES =  cve-2019-5736.c lxctest.h
 lxc_test_destroytest_SOURCES = destroytest.c
 lxc_test_device_add_remove_SOURCES = device_add_remove.c
 lxc_test_getkeys_SOURCES = getkeys.c
@@ -24,7 +25,8 @@ lxc_test_locktests_SOURCES = locktests.c
 lxc_test_lxcpath_SOURCES = lxcpath.c
 lxc_test_may_control_SOURCES = may_control.c
 lxc_test_mount_injection_SOURCES = mount_injection.c lxctest.h
-lxc_test_parse_config_file_SOURCES = parse_config_file.c lxctest.h
+lxc_test_parse_config_file_SOURCES = parse_config_file.c \
+				     lxctest.h
 lxc_test_raw_clone_SOURCES = lxc_raw_clone.c \
 			     lxctest.h \
 			     ../lxc/namespace.c ../lxc/namespace.h \
@@ -48,13 +50,17 @@ AM_CFLAGS=-DLXCROOTFSMOUNT=\"$(LXCROOTFSMOUNT)\" \
 	  -DRUNTIME_PATH=\"$(RUNTIME_PATH)\" \
 	  -I $(top_srcdir)/src \
 	  -I $(top_srcdir)/src/lxc \
-	  -I $(top_srcdir)/src/lxc/bdev \
 	  -I $(top_srcdir)/src/lxc/cgroups \
 	  -I $(top_srcdir)/src/lxc/tools \
 	  -pthread
 
 if ENABLE_APPARMOR
 AM_CFLAGS += -DHAVE_APPARMOR
+endif
+
+if ENABLE_SECCOMP
+AM_CFLAGS += -DHAVE_SECCOMP \
+	     $(SECCOMP_CFLAGS)
 endif
 
 if ENABLE_SELINUX
@@ -74,6 +80,7 @@ bin_PROGRAMS = lxc-test-api-reboot \
 	       lxc-test-containertests \
 	       lxc-test-createtest \
 	       lxc-test-criu-check-feature \
+	       lxc-test-cve-2019-5736 \
 	       lxc-test-destroytest \
 	       lxc-test-device-add-remove \
 	       lxc-test-getkeys \
@@ -128,6 +135,7 @@ EXTRA_DIST = basic.c \
 	     containertests.c \
 	     createtest.c \
 	     criu_check_feature.c \
+	     cve-2019-5736.c \
 	     destroytest.c \
 	     device_add_remove.c \
 	     get_item.c \

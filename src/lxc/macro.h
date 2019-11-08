@@ -3,18 +3,19 @@
  * Copyright © 2018 Christian Brauner <christian.brauner@ubuntu.com>.
  * Copyright © 2018 Canonical Ltd.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+
+ * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #ifndef __LXC_MACRO_H
@@ -148,6 +149,7 @@
 #define LXC_LINELEN 4096
 #define LXC_IDMAPLEN 4096
 #define LXC_MAX_BUFFER 4096
+#define LXC_NAMESPACE_NAME_MAX 256
 
 /* /proc/       =    6
  *                +
@@ -239,8 +241,8 @@ extern int __build_bug_on_failed;
 #define prctl_arg(x) ((unsigned long)x)
 
 /* networking */
-#ifndef NETLINK_DUMP_STRICT_CHK
-#define NETLINK_DUMP_STRICT_CHK 12
+#ifndef NETLINK_GET_STRICT_CHK
+#define NETLINK_GET_STRICT_CHK 12
 #endif
 
 #ifndef SOL_NETLINK
@@ -259,6 +261,10 @@ extern int __build_bug_on_failed;
 #define IFLA_NET_NS_PID 19
 #endif
 
+#ifndef IFLA_NET_NS_FD
+#define IFLA_NET_NS_FD 28
+#endif
+
 #ifndef IFLA_INFO_KIND
 #define IFLA_INFO_KIND 1
 #endif
@@ -275,8 +281,24 @@ extern int __build_bug_on_failed;
 #define VETH_INFO_PEER 1
 #endif
 
+#ifndef VETH_MODE_BRIDGE
+#define VETH_MODE_BRIDGE 1
+#endif
+
+#ifndef VETH_MODE_ROUTER
+#define VETH_MODE_ROUTER 2
+#endif
+
 #ifndef IFLA_MACVLAN_MODE
 #define IFLA_MACVLAN_MODE 1
+#endif
+
+#ifndef IFLA_IPVLAN_MODE
+#define IFLA_IPVLAN_MODE 1
+#endif
+
+#ifndef IFLA_IPVLAN_ISOLATION
+#define IFLA_IPVLAN_ISOLATION 2
 #endif
 
 #ifndef IFLA_NEW_NETNSID
@@ -330,6 +352,30 @@ extern int __build_bug_on_failed;
 
 #ifndef MACVLAN_MODE_PASSTHRU
 #define MACVLAN_MODE_PASSTHRU 8
+#endif
+
+#ifndef IPVLAN_MODE_L2
+#define IPVLAN_MODE_L2 0
+#endif
+
+#ifndef IPVLAN_MODE_L3
+#define IPVLAN_MODE_L3 1
+#endif
+
+#ifndef IPVLAN_MODE_L3S
+#define IPVLAN_MODE_L3S 2
+#endif
+
+#ifndef IPVLAN_ISOLATION_BRIDGE
+#define IPVLAN_ISOLATION_BRIDGE 0
+#endif
+
+#ifndef IPVLAN_ISOLATION_PRIVATE
+#define IPVLAN_ISOLATION_PRIVATE 1
+#endif
+
+#ifndef IPVLAN_ISOLATION_VEPA
+#define IPVLAN_ISOLATION_VEPA 2
 #endif
 
 /* Attributes of RTM_NEWNSID/RTM_GETNSID messages */
@@ -391,5 +437,25 @@ enum {
 
 /* Maximum number of bytes sendfile() is able to send in one go. */
 #define LXC_SENDFILE_MAX 0x7ffff000
+
+#define move_ptr(ptr)                                 \
+	({                                            \
+		typeof(ptr) __internal_ptr__ = (ptr); \
+		(ptr) = NULL;                         \
+		__internal_ptr__;                     \
+	})
+
+#define move_fd(fd)                         \
+	({                                  \
+		int __internal_fd__ = (fd); \
+		(fd) = -EBADF;              \
+		__internal_fd__;            \
+	})
+
+#define minus_one_set_errno(__errno__) \
+	({                             \
+		errno = __errno__;     \
+		-1;                    \
+	})
 
 #endif /* __LXC_MACRO_H */

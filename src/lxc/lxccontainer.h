@@ -867,6 +867,8 @@ struct lxc_container {
 	 */
 	int (*umount)(struct lxc_container *c, const char *target,
 		      unsigned long mountflags, struct lxc_mount *mnt);
+
+	int (*seccomp_notify_fd)(struct lxc_container *c);
 };
 
 /*!

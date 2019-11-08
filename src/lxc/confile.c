@@ -46,6 +46,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "af_unix.h"
 #include "conf.h"
 #include "config.h"
 #include "confile.h"
@@ -53,6 +54,7 @@
 #include "../include/netns_ifaddrs.h"
 #include "log.h"
 #include "lxcseccomp.h"
+#include "memory_utils.h"
 #include "network.h"
 #include "parse.h"
 #include "storage.h"
@@ -127,14 +129,20 @@ lxc_config_define(net_ipv4_gateway);
 lxc_config_define(net_ipv6_address);
 lxc_config_define(net_ipv6_gateway);
 lxc_config_define(net_link);
+lxc_config_define(net_l2proxy);
 lxc_config_define(net_macvlan_mode);
+lxc_config_define(net_ipvlan_mode);
+lxc_config_define(net_ipvlan_isolation);
 lxc_config_define(net_mtu);
 lxc_config_define(net_name);
 lxc_config_define(net_nic);
 lxc_config_define(net_script_down);
 lxc_config_define(net_script_up);
 lxc_config_define(net_type);
+lxc_config_define(net_veth_mode);
 lxc_config_define(net_veth_pair);
+lxc_config_define(net_veth_ipv4_route);
+lxc_config_define(net_veth_ipv6_route);
 lxc_config_define(net_vlan_id);
 lxc_config_define(no_new_privs);
 lxc_config_define(personality);
@@ -145,6 +153,9 @@ lxc_config_define(rootfs_mount);
 lxc_config_define(rootfs_options);
 lxc_config_define(rootfs_path);
 lxc_config_define(seccomp_profile);
+lxc_config_define(seccomp_allow_nesting);
+lxc_config_define(seccomp_notify_cookie);
+lxc_config_define(seccomp_notify_proxy);
 lxc_config_define(selinux_context);
 lxc_config_define(signal_halt);
 lxc_config_define(signal_reboot);
@@ -214,14 +225,20 @@ static struct lxc_config_t config_jump_table[] = {
 	{ "lxc.net.ipv6.address",          set_config_net_ipv6_address,            get_config_net_ipv6_address,            clr_config_net_ipv6_address,          },
 	{ "lxc.net.ipv6.gateway",          set_config_net_ipv6_gateway,            get_config_net_ipv6_gateway,            clr_config_net_ipv6_gateway,          },
 	{ "lxc.net.link",                  set_config_net_link,                    get_config_net_link,                    clr_config_net_link,                  },
+	{ "lxc.net.l2proxy",               set_config_net_l2proxy,                 get_config_net_l2proxy,                 clr_config_net_l2proxy,               },
 	{ "lxc.net.macvlan.mode",          set_config_net_macvlan_mode,            get_config_net_macvlan_mode,            clr_config_net_macvlan_mode,          },
+	{ "lxc.net.ipvlan.mode",           set_config_net_ipvlan_mode,             get_config_net_ipvlan_mode,             clr_config_net_ipvlan_mode,           },
+	{ "lxc.net.ipvlan.isolation",      set_config_net_ipvlan_isolation,        get_config_net_ipvlan_isolation,        clr_config_net_ipvlan_isolation,      },
 	{ "lxc.net.mtu",                   set_config_net_mtu,                     get_config_net_mtu,                     clr_config_net_mtu,                   },
 	{ "lxc.net.name",                  set_config_net_name,                    get_config_net_name,                    clr_config_net_name,                  },
 	{ "lxc.net.script.down",           set_config_net_script_down,             get_config_net_script_down,             clr_config_net_script_down,           },
 	{ "lxc.net.script.up",             set_config_net_script_up,               get_config_net_script_up,               clr_config_net_script_up,             },
 	{ "lxc.net.type",                  set_config_net_type,                    get_config_net_type,                    clr_config_net_type,                  },
 	{ "lxc.net.vlan.id",               set_config_net_vlan_id,                 get_config_net_vlan_id,                 clr_config_net_vlan_id,               },
+	{ "lxc.net.veth.mode",             set_config_net_veth_mode,               get_config_net_veth_mode,               clr_config_net_veth_mode,             },
 	{ "lxc.net.veth.pair",             set_config_net_veth_pair,               get_config_net_veth_pair,               clr_config_net_veth_pair,             },
+	{ "lxc.net.veth.ipv4.route",       set_config_net_veth_ipv4_route,         get_config_net_veth_ipv4_route,         clr_config_net_veth_ipv4_route,       },
+	{ "lxc.net.veth.ipv6.route",       set_config_net_veth_ipv6_route,         get_config_net_veth_ipv6_route,         clr_config_net_veth_ipv6_route,       },
 	{ "lxc.net.",                      set_config_net_nic,                     get_config_net_nic,                     clr_config_net_nic,                   },
 	{ "lxc.net",                       set_config_net,                         get_config_net,                         clr_config_net,                       },
 	{ "lxc.no_new_privs",	           set_config_no_new_privs,                get_config_no_new_privs,                clr_config_no_new_privs,              },
@@ -231,6 +248,9 @@ static struct lxc_config_t config_jump_table[] = {
 	{ "lxc.rootfs.mount",              set_config_rootfs_mount,                get_config_rootfs_mount,                clr_config_rootfs_mount,              },
 	{ "lxc.rootfs.options",            set_config_rootfs_options,              get_config_rootfs_options,              clr_config_rootfs_options,            },
 	{ "lxc.rootfs.path",               set_config_rootfs_path,                 get_config_rootfs_path,                 clr_config_rootfs_path,               },
+	{ "lxc.seccomp.allow_nesting",     set_config_seccomp_allow_nesting,       get_config_seccomp_allow_nesting,       clr_config_seccomp_allow_nesting,     },
+	{ "lxc.seccomp.notify.cookie",     set_config_seccomp_notify_cookie,       get_config_seccomp_notify_cookie,       clr_config_seccomp_notify_cookie,     },
+	{ "lxc.seccomp.notify.proxy",      set_config_seccomp_notify_proxy,        get_config_seccomp_notify_proxy,        clr_config_seccomp_notify_proxy,      },
 	{ "lxc.seccomp.profile",           set_config_seccomp_profile,             get_config_seccomp_profile,             clr_config_seccomp_profile,           },
 	{ "lxc.selinux.context",           set_config_selinux_context,             get_config_selinux_context,             clr_config_selinux_context,           },
 	{ "lxc.signal.halt",               set_config_signal_halt,                 get_config_signal_halt,                 clr_config_signal_halt,               },
@@ -281,19 +301,25 @@ static int set_config_net_type(const char *key, const char *value,
 	if (!netdev)
 		return -1;
 
-	if (!strcmp(value, "veth")) {
+	if (strcmp(value, "veth") == 0) {
 		netdev->type = LXC_NET_VETH;
-	} else if (!strcmp(value, "macvlan")) {
+		lxc_list_init(&netdev->priv.veth_attr.ipv4_routes);
+		lxc_list_init(&netdev->priv.veth_attr.ipv6_routes);
+		lxc_veth_mode_to_flag(&netdev->priv.veth_attr.mode, "bridge");
+	} else if (strcmp(value, "macvlan") == 0) {
 		netdev->type = LXC_NET_MACVLAN;
-		lxc_macvlan_mode_to_flag(&netdev->priv.macvlan_attr.mode,
-					 "private");
-	} else if (!strcmp(value, "vlan")) {
+		lxc_macvlan_mode_to_flag(&netdev->priv.macvlan_attr.mode, "private");
+	} else if (strcmp(value, "ipvlan") == 0) {
+		netdev->type = LXC_NET_IPVLAN;
+		lxc_ipvlan_mode_to_flag(&netdev->priv.ipvlan_attr.mode, "l3");
+		lxc_ipvlan_isolation_to_flag(&netdev->priv.ipvlan_attr.isolation, "bridge");
+	} else if (strcmp(value, "vlan") == 0) {
 		netdev->type = LXC_NET_VLAN;
-	} else if (!strcmp(value, "phys")) {
+	} else if (strcmp(value, "phys") == 0) {
 		netdev->type = LXC_NET_PHYS;
-	} else if (!strcmp(value, "empty")) {
+	} else if (strcmp(value, "empty") == 0) {
 		netdev->type = LXC_NET_EMPTY;
-	} else if (!strcmp(value, "none")) {
+	} else if (strcmp(value, "none") == 0) {
 		netdev->type = LXC_NET_NONE;
 	} else {
 		ERROR("Invalid network type %s", value);
@@ -384,6 +410,35 @@ static int set_config_net_link(const char *key, const char *value,
 	return ret;
 }
 
+static int set_config_net_l2proxy(const char *key, const char *value,
+				     struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+	unsigned int val = 0;
+	int ret;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_net_l2proxy(key, lxc_conf, data);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	ret = lxc_safe_uint(value, &val);
+	if (ret < 0)
+		return minus_one_set_errno(-ret);
+
+	switch (val) {
+	case 0:
+		netdev->l2proxy = false;
+		return 0;
+	case 1:
+		netdev->l2proxy = true;
+		return 0;
+	}
+
+	return minus_one_set_errno(EINVAL);
+}
+
 static int set_config_net_name(const char *key, const char *value,
 			       struct lxc_conf *lxc_conf, void *data)
 {
@@ -396,6 +451,21 @@ static int set_config_net_name(const char *key, const char *value,
 		return -1;
 
 	return network_ifname(netdev->name, value, sizeof(netdev->name));
+}
+
+
+static int set_config_net_veth_mode(const char *key, const char *value,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_net_veth_mode(key, lxc_conf, data);
+
+	if (!netdev)
+		return -1;
+
+	return lxc_veth_mode_to_flag(&netdev->priv.veth_attr.mode, value);
 }
 
 static int set_config_net_veth_pair(const char *key, const char *value,
@@ -424,6 +494,44 @@ static int set_config_net_macvlan_mode(const char *key, const char *value,
 		return -1;
 
 	return lxc_macvlan_mode_to_flag(&netdev->priv.macvlan_attr.mode, value);
+}
+
+static int set_config_net_ipvlan_mode(const char *key, const char *value,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_net_ipvlan_mode(key, lxc_conf, data);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_IPVLAN) {
+		SYSERROR("Invalid ipvlan mode \"%s\", can only be used with ipvlan network", value);
+		return minus_one_set_errno(EINVAL);
+	}
+
+	return lxc_ipvlan_mode_to_flag(&netdev->priv.ipvlan_attr.mode, value);
+}
+
+static int set_config_net_ipvlan_isolation(const char *key, const char *value,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_net_ipvlan_isolation(key, lxc_conf, data);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_IPVLAN) {
+		SYSERROR("Invalid ipvlan isolation \"%s\", can only be used with ipvlan network", value);
+		return minus_one_set_errno(EINVAL);
+	}
+
+	return lxc_ipvlan_isolation_to_flag(&netdev->priv.ipvlan_attr.isolation, value);
 }
 
 static int set_config_net_hwaddr(const char *key, const char *value,
@@ -598,9 +706,13 @@ static int set_config_net_ipv4_gateway(const char *key, const char *value,
 
 	free(netdev->ipv4_gateway);
 
-	if (!strcmp(value, "auto")) {
+	if (strcmp(value, "auto") == 0) {
 		netdev->ipv4_gateway = NULL;
 		netdev->ipv4_gateway_auto = true;
+	} else if (strcmp(value, "dev") == 0) {
+		netdev->ipv4_gateway = NULL;
+		netdev->ipv4_gateway_auto = false;
+		netdev->ipv4_gateway_dev = true;
 	} else {
 		int ret;
 		struct in_addr *gw;
@@ -619,6 +731,69 @@ static int set_config_net_ipv4_gateway(const char *key, const char *value,
 		netdev->ipv4_gateway = gw;
 		netdev->ipv4_gateway_auto = false;
 	}
+
+	return 0;
+}
+
+static int set_config_net_veth_ipv4_route(const char *key, const char *value,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	__do_free char *valdup = NULL;
+	__do_free struct lxc_inetdev *inetdev = NULL;
+	__do_free struct lxc_list *list = NULL;
+	int ret;
+	char *netmask, *slash;
+	struct lxc_netdev *netdev = data;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_net_veth_ipv4_route(key, lxc_conf, data);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_VETH) {
+		SYSERROR("Invalid ipv4 route \"%s\", can only be used with veth network", value);
+		return minus_one_set_errno(EINVAL);
+	}
+
+	inetdev = malloc(sizeof(*inetdev));
+	if (!inetdev)
+		return -1;
+	memset(inetdev, 0, sizeof(*inetdev));
+
+	list = malloc(sizeof(*list));
+	if (!list)
+		return -1;
+
+	lxc_list_init(list);
+	list->elem = inetdev;
+
+	valdup = strdup(value);
+	if (!valdup)
+		return -1;
+
+	slash = strchr(valdup, '/');
+	if (!slash)
+		return minus_one_set_errno(EINVAL);
+
+	*slash = '\0';
+	slash++;
+	if (*slash == '\0')
+		return minus_one_set_errno(EINVAL);
+
+	netmask = slash;
+
+	ret = lxc_safe_uint(netmask, &inetdev->prefix);
+	if (ret < 0 || inetdev->prefix > 32)
+		return minus_one_set_errno(EINVAL);
+
+	ret = inet_pton(AF_INET, valdup, &inetdev->addr);
+	if (!ret || ret < 0)
+		return minus_one_set_errno(EINVAL);
+
+	lxc_list_add_tail(&netdev->priv.veth_attr.ipv4_routes, list);
+	move_ptr(inetdev);
+	move_ptr(list);
 
 	return 0;
 }
@@ -702,9 +877,13 @@ static int set_config_net_ipv6_gateway(const char *key, const char *value,
 
 	free(netdev->ipv6_gateway);
 
-	if (!strcmp(value, "auto")) {
+	if (strcmp(value, "auto") == 0) {
 		netdev->ipv6_gateway = NULL;
 		netdev->ipv6_gateway_auto = true;
+	} else if (strcmp(value, "dev") == 0) {
+		netdev->ipv6_gateway = NULL;
+		netdev->ipv6_gateway_auto = false;
+		netdev->ipv6_gateway_dev = true;
 	} else {
 		int ret;
 		struct in6_addr *gw;
@@ -723,6 +902,69 @@ static int set_config_net_ipv6_gateway(const char *key, const char *value,
 		netdev->ipv6_gateway = gw;
 		netdev->ipv6_gateway_auto = false;
 	}
+
+	return 0;
+}
+
+static int set_config_net_veth_ipv6_route(const char *key, const char *value,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	__do_free char *valdup;
+	__do_free struct lxc_inet6dev *inet6dev;
+	__do_free struct lxc_list *list;
+	int ret;
+	char *netmask, *slash;
+	struct lxc_netdev *netdev = data;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_net_veth_ipv6_route(key, lxc_conf, data);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_VETH) {
+		SYSERROR("Invalid ipv6 route \"%s\", can only be used with veth network", value);
+		return minus_one_set_errno(EINVAL);
+	}
+
+	inet6dev = malloc(sizeof(*inet6dev));
+	if (!inet6dev)
+		return -1;
+	memset(inet6dev, 0, sizeof(*inet6dev));
+
+	list = malloc(sizeof(*list));
+	if (!list)
+		return -1;
+
+	lxc_list_init(list);
+	list->elem = inet6dev;
+
+	valdup = strdup(value);
+	if (!valdup)
+		return -1;
+
+	slash = strchr(valdup, '/');
+	if (!slash)
+		return minus_one_set_errno(EINVAL);
+
+	*slash = '\0';
+	slash++;
+	if (*slash == '\0')
+		return minus_one_set_errno(EINVAL);
+
+	netmask = slash;
+
+	ret = lxc_safe_uint(netmask, &inet6dev->prefix);
+	if (ret < 0 || inet6dev->prefix > 128)
+		return minus_one_set_errno(EINVAL);
+
+	ret = inet_pton(AF_INET6, valdup, &inet6dev->addr);
+	if (!ret || ret < 0)
+		return minus_one_set_errno(EINVAL);
+
+	lxc_list_add_tail(&netdev->priv.veth_attr.ipv6_routes, list);
+	move_ptr(inet6dev);
+	move_ptr(list);
 
 	return 0;
 }
@@ -771,10 +1013,62 @@ static int add_hook(struct lxc_conf *lxc_conf, int which, char *hook)
 	return 0;
 }
 
+static int set_config_seccomp_allow_nesting(const char *key, const char *value,
+					    struct lxc_conf *lxc_conf, void *data)
+{
+#ifdef HAVE_SECCOMP
+	if (lxc_config_value_empty(value))
+		return clr_config_seccomp_allow_nesting(key, lxc_conf, NULL);
+
+	if (lxc_safe_uint(value, &lxc_conf->seccomp.allow_nesting) < 0)
+		return -1;
+
+	if (lxc_conf->seccomp.allow_nesting > 1)
+		return minus_one_set_errno(EINVAL);
+
+	return 0;
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+static int set_config_seccomp_notify_cookie(const char *key, const char *value,
+					    struct lxc_conf *lxc_conf, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	return set_config_string_item(&lxc_conf->seccomp.notifier.cookie, value);
+#else
+	return minus_one_set_errno(ENOSYS);
+#endif
+}
+
+static int set_config_seccomp_notify_proxy(const char *key, const char *value,
+					   struct lxc_conf *lxc_conf, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	const char *offset;
+
+	if (lxc_config_value_empty(value))
+		return clr_config_seccomp_notify_proxy(key, lxc_conf, NULL);
+
+	if (strncmp(value, "unix:", 5) != 0)
+		return minus_one_set_errno(EINVAL);
+
+	offset = value + 5;
+	if (lxc_unix_sockaddr(&lxc_conf->seccomp.notifier.proxy_addr, offset) < 0)
+		return -1;
+
+	return 0;
+#else
+	return minus_one_set_errno(ENOSYS);
+#endif
+}
+
 static int set_config_seccomp_profile(const char *key, const char *value,
 				      struct lxc_conf *lxc_conf, void *data)
 {
-	return set_config_path_item(&lxc_conf->seccomp, value);
+	return set_config_path_item(&lxc_conf->seccomp.seccomp, value);
 }
 
 static int set_config_execute_cmd(const char *key, const char *value,
@@ -1432,6 +1726,26 @@ static int set_config_cgroup_relative(const char *key, const char *value,
 	return -EINVAL;
 }
 
+static bool parse_limit_value(const char **value, rlim_t *res)
+{
+	char *endptr = NULL;
+
+	if (strncmp(*value, "unlimited", STRLITERALLEN("unlimited")) == 0) {
+		*res = RLIM_INFINITY;
+		*value += STRLITERALLEN("unlimited");
+		return true;
+	}
+
+	errno = 0;
+	*res = strtoull(*value, &endptr, 10);
+	if (errno || !endptr)
+		return false;
+
+	*value = endptr;
+
+	return true;
+}
+
 static int set_config_prlimit(const char *key, const char *value,
 			    struct lxc_conf *lxc_conf, void *data)
 {
@@ -2061,6 +2375,40 @@ static int set_config_console_size(const char *key, const char *value,
 	lxc_conf->console.log_size = log_size;
 
 	return 0;
+}
+
+/*
+ * If we find a lxc.net.[i].hwaddr or lxc.network.hwaddr in the original config
+ * file, we expand it in the unexpanded_config, so that after a save_config we
+ * store the hwaddr for re-use.
+ * This is only called when reading the config file, not when executing a
+ * lxc.include.
+ * 'x' and 'X' are substituted in-place.
+ */
+static void update_hwaddr(const char *line)
+{
+	char *p;
+
+	line += lxc_char_left_gc(line, strlen(line));
+	if (line[0] == '#')
+		return;
+
+	if (!lxc_config_net_is_hwaddr(line))
+		return;
+
+	/* Let config_net_hwaddr raise the error. */
+	p = strchr(line, '=');
+	if (!p)
+		return;
+	p++;
+
+	while (isblank(*p))
+		p++;
+
+	if (!*p)
+		return;
+
+	rand_complete_hwaddr(p);
 }
 
 int append_unexp_config_line(const char *line, struct lxc_conf *conf)
@@ -2693,12 +3041,12 @@ int write_config(int fd, const struct lxc_conf *conf)
 bool do_append_unexp_config_line(struct lxc_conf *conf, const char *key,
 				 const char *v)
 {
+	__do_free char *tmp = NULL;
 	int ret;
 	size_t len;
-	char *tmp;
 
 	len = strlen(key) + strlen(v) + 4;
-	tmp = alloca(len);
+	tmp = must_realloc(NULL, len);
 
 	if (lxc_config_value_empty(v))
 		ret = snprintf(tmp, len, "%s =", key);
@@ -2760,21 +3108,23 @@ bool clone_update_unexp_ovl_paths(struct lxc_conf *conf, const char *oldpath,
 				  const char *newpath, const char *oldname,
 				  const char *newname, const char *ovldir)
 {
+	__do_free char *newdir = NULL,
+							 *olddir = NULL;
 	int ret;
-	char *lend, *newdir, *olddir, *p, *q;
+	char *lend, *p, *q;
 	size_t newdirlen, olddirlen;
 	char *lstart = conf->unexpanded_config;
 	const char *key = "lxc.mount.entry";
 
 	olddirlen = strlen(ovldir) + strlen(oldpath) + strlen(oldname) + 2;
-	olddir = alloca(olddirlen + 1);
+	olddir = must_realloc(NULL, olddirlen + 1);
 	ret = snprintf(olddir, olddirlen + 1, "%s=%s/%s", ovldir, oldpath,
 		       oldname);
 	if (ret < 0 || ret >= olddirlen + 1)
 		return false;
 
 	newdirlen = strlen(ovldir) + strlen(newpath) + strlen(newname) + 2;
-	newdir = alloca(newdirlen + 1);
+	newdir = must_realloc(NULL, newdirlen + 1);
 	ret = snprintf(newdir, newdirlen + 1, "%s=%s/%s", ovldir, newpath,
 		       newname);
 	if (ret < 0 || ret >= newdirlen + 1)
@@ -2868,20 +3218,22 @@ bool clone_update_unexp_hooks(struct lxc_conf *conf, const char *oldpath,
 			      const char *newpath, const char *oldname,
 			      const char *newname)
 {
+	__do_free char *newdir = NULL,
+							 *olddir = NULL;
 	int ret;
-	char *lend, *newdir, *olddir, *p;
+	char *lend, *p;
 	char *lstart = conf->unexpanded_config;
 	size_t newdirlen, olddirlen;
 	const char *key = "lxc.hook";
 
 	olddirlen = strlen(oldpath) + strlen(oldname) + 1;
-	olddir = alloca(olddirlen + 1);
+	olddir = must_realloc(NULL, olddirlen + 1);
 	ret = snprintf(olddir, olddirlen + 1, "%s/%s", oldpath, oldname);
 	if (ret < 0 || ret >= olddirlen + 1)
 		return false;
 
 	newdirlen = strlen(newpath) + strlen(newname) + 1;
-	newdir = alloca(newdirlen + 1);
+	newdir = must_realloc(NULL, newdirlen + 1);
 	ret = snprintf(newdir, newdirlen + 1, "%s/%s", newpath, newname);
 	if (ret < 0 || ret >= newdirlen + 1)
 		return false;
@@ -2992,7 +3344,7 @@ bool network_new_hwaddrs(struct lxc_conf *conf)
 		else
 			lend++;
 
-		if (!lxc_config_net_hwaddr(lstart)) {
+		if (!lxc_config_net_is_hwaddr(lstart)) {
 			lstart = lend;
 			continue;
 		}
@@ -3621,11 +3973,45 @@ static int get_config_console_size(const char *key, char *retv, int inlen,
 	return lxc_get_conf_uint64(c, retv, inlen, c->console.log_size);
 }
 
+static int get_config_seccomp_allow_nesting(const char *key, char *retv,
+					    int inlen, struct lxc_conf *c,
+					    void *data)
+{
+#ifdef HAVE_SECCOMP
+	return lxc_get_conf_int(c, retv, inlen, c->seccomp.allow_nesting);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+static int get_config_seccomp_notify_cookie(const char *key, char *retv, int inlen,
+					    struct lxc_conf *c, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	return lxc_get_conf_str(retv, inlen, c->seccomp.notifier.cookie);
+#else
+	return minus_one_set_errno(ENOSYS);
+#endif
+}
+
+static int get_config_seccomp_notify_proxy(const char *key, char *retv, int inlen,
+					   struct lxc_conf *c, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	return lxc_get_conf_str(retv, inlen,
+				(c->seccomp.notifier.proxy_addr.sun_path[0]) == '/'
+				    ? &c->seccomp.notifier.proxy_addr.sun_path[0]
+				    : &c->seccomp.notifier.proxy_addr.sun_path[1]);
+#else
+	return minus_one_set_errno(ENOSYS);
+#endif
+}
 
 static int get_config_seccomp_profile(const char *key, char *retv, int inlen,
 				      struct lxc_conf *c, void *data)
 {
-	return lxc_get_conf_str(retv, inlen, c->seccomp);
+	return lxc_get_conf_str(retv, inlen, c->seccomp.seccomp);
 }
 
 static int get_config_autodev(const char *key, char *retv, int inlen,
@@ -4205,11 +4591,47 @@ static inline int clr_config_console_size(const char *key, struct lxc_conf *c,
 	return 0;
 }
 
+static inline int clr_config_seccomp_allow_nesting(const char *key,
+						   struct lxc_conf *c, void *data)
+{
+#ifdef HAVE_SECCOMP
+	c->seccomp.allow_nesting = 0;
+	return 0;
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+static inline int clr_config_seccomp_notify_cookie(const char *key,
+						   struct lxc_conf *c, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	free(c->seccomp.notifier.cookie);
+	c->seccomp.notifier.cookie = NULL;
+	return 0;
+#else
+	return minus_one_set_errno(ENOSYS);
+#endif
+}
+
+static inline int clr_config_seccomp_notify_proxy(const char *key,
+						   struct lxc_conf *c, void *data)
+{
+#ifdef HAVE_SECCOMP_NOTIFY
+	memset(&c->seccomp.notifier.proxy_addr, 0,
+	       sizeof(c->seccomp.notifier.proxy_addr));
+	return 0;
+#else
+	return minus_one_set_errno(ENOSYS);
+#endif
+}
+
 static inline int clr_config_seccomp_profile(const char *key,
 					     struct lxc_conf *c, void *data)
 {
-	free(c->seccomp);
-	c->seccomp = NULL;
+	free(c->seccomp.seccomp);
+	c->seccomp.seccomp = NULL;
 	return 0;
 }
 
@@ -4629,6 +5051,19 @@ static int clr_config_net_link(const char *key, struct lxc_conf *lxc_conf,
 	return 0;
 }
 
+static int clr_config_net_l2proxy(const char *key, struct lxc_conf *lxc_conf,
+			       void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	netdev->l2proxy = false;
+
+	return 0;
+}
+
 static int clr_config_net_macvlan_mode(const char *key,
 				       struct lxc_conf *lxc_conf, void *data)
 {
@@ -4641,6 +5076,54 @@ static int clr_config_net_macvlan_mode(const char *key,
 		return 0;
 
 	netdev->priv.macvlan_attr.mode = -1;
+
+	return 0;
+}
+
+static int clr_config_net_ipvlan_mode(const char *key,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_IPVLAN)
+		return 0;
+
+	netdev->priv.ipvlan_attr.mode = -1;
+
+	return 0;
+}
+
+static int clr_config_net_ipvlan_isolation(const char *key,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_IPVLAN)
+		return 0;
+
+	netdev->priv.ipvlan_attr.isolation = -1;
+
+	return 0;
+}
+
+static int clr_config_net_veth_mode(const char *key,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_VETH)
+		return 0;
+
+	netdev->priv.veth_attr.mode = -1;
 
 	return 0;
 }
@@ -4759,6 +5242,24 @@ static int clr_config_net_ipv4_address(const char *key,
 	return 0;
 }
 
+static int clr_config_net_veth_ipv4_route(const char *key,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+	struct lxc_list *cur, *next;
+
+	if (!netdev)
+		return -1;
+
+	lxc_list_for_each_safe(cur, &netdev->priv.veth_attr.ipv4_routes, next) {
+		lxc_list_del(cur);
+		free(cur->elem);
+		free(cur);
+	}
+
+	return 0;
+}
+
 static int clr_config_net_ipv6_gateway(const char *key,
 				       struct lxc_conf *lxc_conf, void *data)
 {
@@ -4783,6 +5284,24 @@ static int clr_config_net_ipv6_address(const char *key,
 		return -1;
 
 	lxc_list_for_each_safe(cur, &netdev->ipv6, next) {
+		lxc_list_del(cur);
+		free(cur->elem);
+		free(cur);
+	}
+
+	return 0;
+}
+
+static int clr_config_net_veth_ipv6_route(const char *key,
+				       struct lxc_conf *lxc_conf, void *data)
+{
+	struct lxc_netdev *netdev = data;
+	struct lxc_list *cur, *next;
+
+	if (!netdev)
+		return -1;
+
+	lxc_list_for_each_safe(cur, &netdev->priv.veth_attr.ipv6_routes, next) {
 		lxc_list_del(cur);
 		free(cur->elem);
 		free(cur);
@@ -4883,6 +5402,13 @@ static int get_config_net_link(const char *key, char *retv, int inlen,
 	return fulllen;
 }
 
+static int get_config_net_l2proxy(const char *key, char *retv, int inlen,
+			       struct lxc_conf *c, void *data)
+{
+	struct lxc_netdev *netdev = data;
+	return lxc_get_conf_bool(c, retv, inlen, netdev->l2proxy);
+}
+
 static int get_config_net_name(const char *key, char *retv, int inlen,
 			       struct lxc_conf *c, void *data)
 {
@@ -4935,6 +5461,120 @@ static int get_config_net_macvlan_mode(const char *key, char *retv, int inlen,
 		break;
 	case MACVLAN_MODE_PASSTHRU:
 		mode = "passthru";
+		break;
+	default:
+		mode = "(invalid)";
+		break;
+	}
+
+	strprint(retv, inlen, "%s", mode);
+
+	return fulllen;
+}
+
+static int get_config_net_ipvlan_mode(const char *key, char *retv, int inlen,
+				       struct lxc_conf *c, void *data)
+{
+	int len;
+	int fulllen = 0;
+	const char *mode;
+	struct lxc_netdev *netdev = data;
+
+	if (!retv)
+		inlen = 0;
+	else
+		memset(retv, 0, inlen);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_IPVLAN)
+		return 0;
+
+	switch (netdev->priv.ipvlan_attr.mode) {
+	case IPVLAN_MODE_L3:
+		mode = "l3";
+		break;
+	case IPVLAN_MODE_L3S:
+		mode = "l3s";
+		break;
+	case IPVLAN_MODE_L2:
+		mode = "l2";
+		break;
+	default:
+		mode = "(invalid)";
+		break;
+	}
+
+	strprint(retv, inlen, "%s", mode);
+
+	return fulllen;
+}
+
+static int get_config_net_ipvlan_isolation(const char *key, char *retv, int inlen,
+				       struct lxc_conf *c, void *data)
+{
+	int len;
+	int fulllen = 0;
+	const char *mode;
+	struct lxc_netdev *netdev = data;
+
+	if (!retv)
+		inlen = 0;
+	else
+		memset(retv, 0, inlen);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_IPVLAN)
+		return 0;
+
+	switch (netdev->priv.ipvlan_attr.isolation) {
+	case IPVLAN_ISOLATION_BRIDGE:
+		mode = "bridge";
+		break;
+	case IPVLAN_ISOLATION_PRIVATE:
+		mode = "private";
+		break;
+	case IPVLAN_ISOLATION_VEPA:
+		mode = "vepa";
+		break;
+	default:
+		mode = "(invalid)";
+		break;
+	}
+
+	strprint(retv, inlen, "%s", mode);
+
+	return fulllen;
+}
+
+static int get_config_net_veth_mode(const char *key, char *retv, int inlen,
+				       struct lxc_conf *c, void *data)
+{
+	int len;
+	int fulllen = 0;
+	const char *mode;
+	struct lxc_netdev *netdev = data;
+
+	if (!retv)
+		inlen = 0;
+	else
+		memset(retv, 0, inlen);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_VETH)
+		return 0;
+
+	switch (netdev->priv.veth_attr.mode) {
+	case VETH_MODE_BRIDGE:
+		mode = "bridge";
+		break;
+	case VETH_MODE_ROUTER:
+		mode = "router";
 		break;
 	default:
 		mode = "(invalid)";
@@ -5097,6 +5737,8 @@ static int get_config_net_ipv4_gateway(const char *key, char *retv, int inlen,
 
 	if (netdev->ipv4_gateway_auto) {
 		strprint(retv, inlen, "auto");
+	} else if (netdev->ipv4_gateway_dev) {
+		strprint(retv, inlen, "dev");
 	} else if (netdev->ipv4_gateway) {
 		inet_ntop(AF_INET, netdev->ipv4_gateway, buf, sizeof(buf));
 		strprint(retv, inlen, "%s", buf);
@@ -5135,6 +5777,39 @@ static int get_config_net_ipv4_address(const char *key, char *retv, int inlen,
 	return fulllen;
 }
 
+static int get_config_net_veth_ipv4_route(const char *key, char *retv, int inlen,
+				       struct lxc_conf *c, void *data)
+{
+	int len;
+	size_t listlen;
+	char buf[INET_ADDRSTRLEN];
+	struct lxc_list *it;
+	int fulllen = 0;
+	struct lxc_netdev *netdev = data;
+
+	if (!retv)
+		inlen = 0;
+	else
+		memset(retv, 0, inlen);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_VETH)
+		return 0;
+
+	listlen = lxc_list_len(&netdev->priv.veth_attr.ipv4_routes);
+
+	lxc_list_for_each(it, &netdev->priv.veth_attr.ipv4_routes) {
+		struct lxc_inetdev *i = it->elem;
+		inet_ntop(AF_INET, &i->addr, buf, sizeof(buf));
+		strprint(retv, inlen, "%s/%u%s", buf, i->prefix,
+			 (listlen-- > 1) ? "\n" : "");
+	}
+
+	return fulllen;
+}
+
 static int get_config_net_ipv6_gateway(const char *key, char *retv, int inlen,
 				       struct lxc_conf *c, void *data)
 {
@@ -5153,6 +5828,8 @@ static int get_config_net_ipv6_gateway(const char *key, char *retv, int inlen,
 
 	if (netdev->ipv6_gateway_auto) {
 		strprint(retv, inlen, "auto");
+	} else if (netdev->ipv6_gateway_dev) {
+		strprint(retv, inlen, "dev");
 	} else if (netdev->ipv6_gateway) {
 		inet_ntop(AF_INET6, netdev->ipv6_gateway, buf, sizeof(buf));
 		strprint(retv, inlen, "%s", buf);
@@ -5182,6 +5859,39 @@ static int get_config_net_ipv6_address(const char *key, char *retv, int inlen,
 	listlen = lxc_list_len(&netdev->ipv6);
 
 	lxc_list_for_each(it, &netdev->ipv6) {
+		struct lxc_inet6dev *i = it->elem;
+		inet_ntop(AF_INET6, &i->addr, buf, sizeof(buf));
+		strprint(retv, inlen, "%s/%u%s", buf, i->prefix,
+			 (listlen-- > 1) ? "\n" : "");
+	}
+
+	return fulllen;
+}
+
+static int get_config_net_veth_ipv6_route(const char *key, char *retv, int inlen,
+				       struct lxc_conf *c, void *data)
+{
+	int len;
+	size_t listlen;
+	char buf[INET6_ADDRSTRLEN];
+	struct lxc_list *it;
+	int fulllen = 0;
+	struct lxc_netdev *netdev = data;
+
+	if (!retv)
+		inlen = 0;
+	else
+		memset(retv, 0, inlen);
+
+	if (!netdev)
+		return minus_one_set_errno(EINVAL);
+
+	if (netdev->type != LXC_NET_VETH)
+		return 0;
+
+	listlen = lxc_list_len(&netdev->priv.veth_attr.ipv6_routes);
+
+	lxc_list_for_each(it, &netdev->priv.veth_attr.ipv6_routes) {
 		struct lxc_inet6dev *i = it->elem;
 		inet_ntop(AF_INET6, &i->addr, buf, sizeof(buf));
 		strprint(retv, inlen, "%s/%u%s", buf, i->prefix,
@@ -5324,9 +6034,15 @@ int lxc_list_net(struct lxc_conf *c, const char *key, char *retv, int inlen)
 	switch (netdev->type) {
 	case LXC_NET_VETH:
 		strprint(retv, inlen, "veth.pair\n");
+		strprint(retv, inlen, "veth.ipv4.route\n");
+		strprint(retv, inlen, "veth.ipv6.route\n");
 		break;
 	case LXC_NET_MACVLAN:
 		strprint(retv, inlen, "macvlan.mode\n");
+		break;
+	case LXC_NET_IPVLAN:
+		strprint(retv, inlen, "ipvlan.mode\n");
+		strprint(retv, inlen, "ipvlan.isolation\n");
 		break;
 	case LXC_NET_VLAN:
 		strprint(retv, inlen, "vlan.id\n");

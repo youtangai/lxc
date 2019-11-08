@@ -1,8 +1,8 @@
 LXC Coding Style Guide
 ======================
 
-In general the LXC project follows the Linux kernel coding style.  There are
-however are a few differences, these are outlined in this document.
+In general the LXC project follows the Linux kernel coding style.  However,
+there are a few differences. They are outlined in this document.
 
 The Linux kernel coding style guide can be found within the kernel tree:
 
@@ -83,15 +83,17 @@ https://www.kernel.org/doc/html/latest/process/coding-style.html
 ## 3) Only use `/* */` Style Comments
 
 - Any comments that are added must use `/* */`.
-- All comments should start on the same line as the opening `/*`.
+- Single-line comments should start on the same line as the opening `/*`.
 - Single-line comments should simply be placed between `/* */`. For example:
   ```C
   /* Define pivot_root() if missing from the C library */
   ```
-- Multi-line comments should end with the closing `*/` on a separate line. For
+- Mutli-line comment should start on the next line following the opening
+  `/*`and should end with the closing `*/` on a separate line. For
   example:
   ```C
-  /* At this point the old-root is mounted on top of our new-root
+  /*
+   * At this point the old-root is mounted on top of our new-root
    * To unmounted it we must not be chdir()ed into it, so escape back
    * to old-root.
    */
@@ -109,16 +111,49 @@ https://www.kernel.org/doc/html/latest/process/coding-style.html
   punctuation sign.
 - They should be descriptive, without being needlessly long. It is best to just
   use already existing error messages as examples.
+- The commit message itself is not subject to rule 4), i.e. it should not be
+  wrapped at 80chars. This is to make it easy to grep for it.
 - Examples of acceptable error messages are:
   ```C
   SYSERROR("Failed to create directory \"%s\"", path);
   WARN("\"/dev\" directory does not exist. Proceeding without autodev being set up");
   ```
 
-## 6) Return Error Codes
+## 6) Set `errno`
 
-- When writing a function that can fail in a non-binary way try to return
-  meaningful negative error codes (e.g. `return -EINVAL;`).
+- Functions that can fail in a non-binary way should return `-1` and set
+  `errno` to a meaningful error code.
+  As a convenience LXC provides the `minus_one_set_errno` macro:
+  ```C
+  static int set_config_net_l2proxy(const char *key, const char *value,
+                                    struct lxc_conf *lxc_conf, void *data)
+  {
+          struct lxc_netdev *netdev = data;
+          unsigned int val = 0;
+          int ret;
+
+          if (lxc_config_value_empty(value))
+                  return clr_config_net_l2proxy(key, lxc_conf, data);
+
+          if (!netdev)
+                  return minus_one_set_errno(EINVAL);
+
+          ret = lxc_safe_uint(value, &val);
+          if (ret < 0)
+                  return minus_one_set_errno(-ret);
+
+          switch (val) {
+          case 0:
+                  netdev->l2proxy = false;
+                  return 0;
+          case 1:
+                  netdev->l2proxy = true;
+                  return 0;
+          }
+
+          return minus_one_set_errno(EINVAL);
+  }
+  ```
 
 ## 7) All Unexported Functions Must Be Declared `static`
 
@@ -133,15 +168,17 @@ https://www.kernel.org/doc/html/latest/process/coding-style.html
 ## 9) Declaring Variables
 
 - variables should be declared at the top of the function or at the beginning
-  of a new scope but **never** in the middle of a scope
-1. uninitialized variables
-  - put base types before complex types
-  - put standard types defined by libc before types defined by LXC
-  - put multiple declarations of the same type on the same line
+  of a new scope but **never** in the middle of a scope. They should be ordered
+  in the following way:
+1. automatically freed variables
+   - This specifically references variables cleaned up via the `cleanup`
+     attribute as supported by `gcc` and `clang`.
 2. initialized variables
-  - put base types before complex types
-  - put standard types defined by libc before types defined by LXC
-  - put multiple declarations of the same type on the same line
+3. uninitialized variables
+General rules are:
+- put base types before complex types
+- put standard types defined by libc before types defined by LXC
+- put multiple declarations of the same type on the same line
 - Examples of good declarations can be seen in the following function:
   ```C
   int lxc_clear_procs(struct lxc_conf *c, const char *key)
@@ -660,5 +697,125 @@ int lxc_attach_run_command(void *payload)
 
 	SYSERROR("Failed to exec \"%s\"", cmd->program);
 	return ret;
+}
+```
+
+## 24) Never use `fgets()`
+
+LXC does not allow the use of `fgets()`. Use `getline()` or other methods
+instead.
+
+## 25) Never allocate memory on the stack
+
+This specifically forbids any usage of `alloca()` in the codebase.
+
+## 26) Use cleanup macros supported by `gcc` and `clang`
+
+LXC has switched from manually cleaning up resources to using cleanup macros
+supported by `gcc` and `clang`:
+```c
+__attribute__((__cleanup__(<my-cleanup-function-wrapper>)))
+```
+We do not allow manually cleanups anymore if there are appropriate macros.
+Currently the following macros are supported:
+```c
+/* close file descriptor */
+__do_close_prot_errno
+
+/* free allocated memory */
+__do_free __attribute__((__cleanup__(__auto_free__)))
+
+/* close FILEs */
+__do_fclose __attribute__((__cleanup__(__auto_fclose__)))
+
+/* close DIRs */
+__do_closedir __attribute__((__cleanup__(__auto_closedir__)))
+```
+For example:
+```c
+void remount_all_slave(void)
+{
+	__do_free char *line = NULL;
+	__do_fclose FILE *f = NULL;
+	__do_close_prot_errno int memfd = -EBADF, mntinfo_fd = -EBADF;
+	int ret;
+	ssize_t copied;
+	size_t len = 0;
+
+	mntinfo_fd = open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+	if (mntinfo_fd < 0) {
+		SYSERROR("Failed to open \"/proc/self/mountinfo\"");
+		return;
+	}
+
+	memfd = memfd_create(".lxc_mountinfo", MFD_CLOEXEC);
+	if (memfd < 0) {
+		char template[] = P_tmpdir "/.lxc_mountinfo_XXXXXX";
+
+		if (errno != ENOSYS) {
+			SYSERROR("Failed to create temporary in-memory file");
+			return;
+		}
+
+		memfd = lxc_make_tmpfile(template, true);
+		if (memfd < 0) {
+			WARN("Failed to create temporary file");
+			return;
+		}
+	}
+
+again:
+	copied = lxc_sendfile_nointr(memfd, mntinfo_fd, NULL, LXC_SENDFILE_MAX);
+	if (copied < 0) {
+		if (errno == EINTR)
+			goto again;
+
+		SYSERROR("Failed to copy \"/proc/self/mountinfo\"");
+		return;
+	}
+
+	ret = lseek(memfd, 0, SEEK_SET);
+	if (ret < 0) {
+		SYSERROR("Failed to reset file descriptor offset");
+		return;
+	}
+
+	f = fdopen(memfd, "r");
+	if (!f) {
+		SYSERROR("Failed to open copy of \"/proc/self/mountinfo\" to mark all shared. Continuing");
+		return;
+	}
+
+	/*
+	 * After a successful fdopen() memfd will be closed when calling
+	 * fclose(f). Calling close(memfd) afterwards is undefined.
+	 */
+	move_fd(memfd);
+
+	while (getline(&line, &len, f) != -1) {
+		char *opts, *target;
+
+		target = get_field(line, 4);
+		if (!target)
+			continue;
+
+		opts = get_field(target, 2);
+		if (!opts)
+			continue;
+
+		null_endofword(opts);
+		if (!strstr(opts, "shared"))
+			continue;
+
+		null_endofword(target);
+		ret = mount(NULL, target, NULL, MS_SLAVE, NULL);
+		if (ret < 0) {
+			SYSERROR("Failed to make \"%s\" MS_SLAVE", target);
+			ERROR("Continuing...");
+			continue;
+		}
+		TRACE("Remounted \"%s\" as MS_SLAVE", target);
+	}
+	TRACE("Remounted all mount table entries as MS_SLAVE");
 }
 ```
