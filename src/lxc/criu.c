@@ -235,11 +235,11 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		if (opts->user->ghost_limit)
 			static_args += 2;
 	} else if (strcmp(opts->action, "restore") == 0) {
-		/* --root $(lxc_mount_point) --restore-detached
+		/* --root $(lxc_mount_point) --restore-detached --track-mem
 		 * --restore-sibling
 		 * --lsm-profile apparmor:whatever
 		 */
-		static_args += 6;
+		static_args += 7;
 
 		ttys[0] = 0;
 		if (load_tty_major_minor(opts->user->directory, ttys, sizeof(ttys)))
@@ -496,6 +496,7 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		DECLARE_ARG(opts->c->lxc_conf->rootfs.mount);
 		DECLARE_ARG("--restore-detached");
 		DECLARE_ARG("--restore-sibling");
+		DECLARE_ARG("--track-mem");
 
 		if (ttys[0]) {
 			if (opts->console_fd < 0) {
