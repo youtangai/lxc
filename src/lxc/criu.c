@@ -213,7 +213,7 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 
 		/* --prev-images-dir <path-to-directory-A-relative-to-B> */
 		if (opts->user->predump_dir)
-			static_args += 1;
+			static_args += 2;
 
 		/* --page-server --address <address> --port <port> */
 		if (opts->user->pageserver_address && opts->user->pageserver_port)
@@ -427,7 +427,9 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		DECLARE_ARG("-t");
 		DECLARE_ARG(pid);
 
-		freezer_relative = lxc_cmd_get_cgroup_path(opts->c->name,
+        DECLARE_ARG("--track-mem"); // always track-mem is needed on zanshin by youtangai
+
+        freezer_relative = lxc_cmd_get_cgroup_path(opts->c->name,
 							   opts->c->config_path,
 							   "freezer");
 		if (!freezer_relative) {
@@ -445,7 +447,6 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 
 		DECLARE_ARG("--freeze-cgroup");
 		DECLARE_ARG(log);
-        DECLARE_ARG("--track-mem"); // always track-mem is needed on zanshin by youtangai
 
 		if (opts->tty_id[0]) {
 			DECLARE_ARG("--ext-mount-map");
