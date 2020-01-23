@@ -427,6 +427,7 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		DECLARE_ARG("-t");
 		DECLARE_ARG(pid);
 
+		INFO("youtangai track-mem");
         DECLARE_ARG("--track-mem"); // always track-mem is needed on zanshin by youtangai
 
         freezer_relative = lxc_cmd_get_cgroup_path(opts->c->name,
