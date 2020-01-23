@@ -208,12 +208,12 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 	 * +1 for final NULL */
 
 	if (strcmp(opts->action, "dump") == 0 || strcmp(opts->action, "pre-dump") == 0) {
-		/* -t pid --freeze-cgroup /lxc/ct */
-		static_args += 4;
+		/* -t pid --freeze-cgroup /lxc/ct --track-mem */
+		static_args += 5;
 
 		/* --prev-images-dir <path-to-directory-A-relative-to-B> */
 		if (opts->user->predump_dir)
-			static_args += 2;
+			static_args += 1;
 
 		/* --page-server --address <address> --port <port> */
 		if (opts->user->pageserver_address && opts->user->pageserver_port)
@@ -445,6 +445,7 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 
 		DECLARE_ARG("--freeze-cgroup");
 		DECLARE_ARG(log);
+        DECLARE_ARG("--track-mem"); // always track-mem is needed on zanshin by youtangai
 
 		if (opts->tty_id[0]) {
 			DECLARE_ARG("--ext-mount-map");
@@ -457,7 +458,7 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		if (opts->user->predump_dir) {
 			DECLARE_ARG("--prev-images-dir");
 			DECLARE_ARG(opts->user->predump_dir);
-			DECLARE_ARG("--track-mem");
+			//DECLARE_ARG("--track-mem");
 		}
 
 		if (opts->user->pageserver_address && opts->user->pageserver_port) {
