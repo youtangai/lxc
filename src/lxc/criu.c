@@ -178,7 +178,7 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		      struct criu_opts *opts)
 {
 	char **argv, log[PATH_MAX];
-	int static_args = 23, argc = 0, i, ret;
+	int static_args = 21, argc = 0, i, ret;
 	int netnr = 0;
 	struct lxc_list *it;
 	FILE *mnts;
@@ -255,8 +255,8 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 	if (cgroup_ops->num_hierarchies(cgroup_ops) > 0)
 		static_args += 2 * cgroup_ops->num_hierarchies(cgroup_ops);
 
-	if (opts->user->verbose)
-		static_args++;
+	// if (opts->user->verbose)
+	// 	static_args++;
 
 	if (opts->user->action_script)
 		static_args += 2;
@@ -307,8 +307,8 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 	DECLARE_ARG("tracefs");
 	DECLARE_ARG("-D");
 	DECLARE_ARG(opts->user->directory);
-	DECLARE_ARG("-o");
-	DECLARE_ARG(log);
+	//DECLARE_ARG("-o");
+	//DECLARE_ARG(log);
 
 	for (i = 0; i < cgroup_ops->num_hierarchies(cgroup_ops); i++) {
 		char **controllers = NULL, *fullname;
@@ -374,8 +374,8 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		DECLARE_ARG(buf);
 	}
 
-	if (opts->user->verbose)
-		DECLARE_ARG("-v4");
+	//if (opts->user->verbose)
+	//	DECLARE_ARG("-v4");
 
 	if (opts->user->action_script) {
 		DECLARE_ARG("--action-script");
